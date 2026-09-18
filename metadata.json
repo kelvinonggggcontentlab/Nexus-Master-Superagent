@@ -1,0 +1,6 @@
+{
+  "name": "NEXUS MASTER SUPERAGENT™",
+  "description": "The Master Intelligence Layer that thinks, plans, delegates, executes, verifies, and evolves by BLACKTOWER™.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

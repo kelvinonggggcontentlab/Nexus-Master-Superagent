@@ -1,0 +1,199 @@
+import express from 'express';
+import path from 'path';
+import dotenv from 'dotenv';
+import { createServer as createViteServer } from 'vite';
+import { nexusStore } from './server/db/store';
+import { createExecutionPlan } from './server/agent/planner';
+import { agentRuntime } from './server/agent/runtime';
+import { ExecutionRun, NexusMessage } from './src/types/nexus';
+
+dotenv.config();
+
+const app = express();
+const PORT = 3000;
+
+app.use(express.json({ limit: '15mb' }));
+
+// Health Check
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'NEXUS MASTER SUPERAGENT™',
+    owner: 'BLACKTOWER™',
+    environment: process.env.NODE_ENV || 'development',
+    time: new Date().toISOString(),
+  });
+});
+
+// Conversations list
+app.get('/api/conversations', (req, res) => {
+  const sessions = nexusStore.getConversations();
+  res.json({ sessions });
+});
+
+// Create conversation
+app.post('/api/conversations', (req, res) => {
+  const session = nexusStore.getOrCreateConversation();
+  res.json({ session });
+});
+
+// Delete conversation
+app.delete('/api/conversations/:id', (req, res) => {
+  nexusStore.deleteConversation(req.params.id);
+  res.json({ success: true });
+});
+
+// Messages for a conversation
+app.get('/api/conversations/:id/messages', (req, res) => {
+  const messages = nexusStore.getMessages(req.params.id);
+  res.json({ messages });
+});
+
+// Primary Chat / Execution endpoint
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { conversationId, content, attachments } = req.body;
+    if (!content && (!attachments || attachments.length === 0)) {
+      return res.status(400).json({ error: 'Message content or attachment required.' });
+    }
+
+    const conv = nexusStore.getOrCreateConversation(conversationId);
+
+    // 1. Record User Message
+    const userMsg: NexusMessage = {
+      id: `msg_user_${Date.now().toString(36)}`,
+      role: 'user',
+      content: content || 'Analyze attached document',
+      timestamp: new Date().toISOString(),
+      attachments: attachments || [],
+    };
+    nexusStore.addMessage(conv.id, userMsg);
+
+    // 2. Create Execution Plan (Gemini or heuristic)
+    const plan = await createExecutionPlan(userMsg.content, attachments);
+
+    // 3. Initialize Execution Run
+    const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+    const executionRun: ExecutionRun = {
+      id: runId,
+      conversationId: conv.id,
+      userPrompt: userMsg.content,
+      status: 'planning',
+      plan,
+      currentStepIndex: 0,
+      stepsCompleted: 0,
+      totalSteps: plan.steps.length,
+      activeStatusText: 'Synthesizing task graph...',
+      results: {},
+      verificationBadges: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    nexusStore.saveExecutionRun(executionRun);
+
+    // 4. Execute Autonomous Workflow
+    const completedRun = await agentRuntime.executePlan(executionRun);
+
+    // 5. Formulate Assistant Response
+    const assistantMsg: NexusMessage = {
+      id: `msg_ast_${Date.now().toString(36)}`,
+      role: 'assistant',
+      content: completedRun.finalResponse || 'Action completed and verified.',
+      timestamp: new Date().toISOString(),
+      executionRun: completedRun,
+    };
+    nexusStore.addMessage(conv.id, assistantMsg);
+
+    res.json({
+      message: assistantMsg,
+      executionRun: completedRun,
+    });
+  } catch (error: any) {
+    console.error('Chat execution error:', error);
+    res.status(500).json({ error: error.message || 'Workflow execution error' });
+  }
+});
+
+// Confirm step for actions requiring confirmation
+app.post('/api/confirm-step', async (req, res) => {
+  try {
+    const { runId, stepId, confirmed } = req.body;
+    const run = nexusStore.getExecutionRun(runId);
+    if (!run) {
+      return res.status(404).json({ error: 'Execution run not found' });
+    }
+
+    const step = run.plan.steps.find(s => s.id === stepId);
+    if (!step) {
+      return res.status(404).json({ error: 'Step not found' });
+    }
+
+    if (!confirmed) {
+      step.status = 'skipped';
+      run.status = 'completed';
+      run.finalResponse = 'Destructive operation was aborted by user.';
+      nexusStore.saveExecutionRun(run);
+      return res.json({ run });
+    }
+
+    step.confirmationGranted = true;
+    const completedRun = await agentRuntime.executePlan(run);
+    res.json({ run: completedRun });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Observability and Audit Logs
+app.get('/api/observability', (req, res) => {
+  const summary = nexusStore.getObservabilitySummary();
+  res.json(summary);
+});
+
+// Integrations Status
+app.get('/api/integrations', (req, res) => {
+  const integrations = nexusStore.getIntegrations();
+  res.json({ integrations });
+});
+
+// Toggle Integration (useful for testing failure recovery in simulation/sandbox)
+app.post('/api/integrations/toggle', (req, res) => {
+  const { service, connected } = req.body;
+  nexusStore.setIntegrationStatus(service, !!connected);
+  res.json({ success: true, integrations: nexusStore.getIntegrations() });
+});
+
+// Memory API
+app.get('/api/memory', (req, res) => {
+  res.json({ memories: nexusStore.getMemories() });
+});
+
+app.post('/api/memory', (req, res) => {
+  const { key, value, category } = req.body;
+  if (!key || !value) return res.status(400).json({ error: 'Key and value required' });
+  const mem = nexusStore.setMemory(key, value, category || 'preference');
+  res.json({ memory: mem });
+});
+
+// Vite Middleware & Static Serving
+async function start() {
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`NEXUS Server running on http://0.0.0.0:${PORT}`);
+  });
+}
+
+start();
