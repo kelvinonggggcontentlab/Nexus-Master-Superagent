@@ -12,7 +12,7 @@ class NexusStore {
   private messages: Map<string, NexusMessage[]> = new Map();
   private executionRuns: Map<string, ExecutionRun> = new Map();
   private toolLogs: ToolCallLog[] = [];
-  private idempotencyKeys: Set<string> = new Set();
+  private idempotencyKeys: Map<string, number> = new Map();
   private memories: Map<string, MemoryRecord> = new Map();
   private integrations: Map<string, IntegrationAccount> = new Map();
 
@@ -20,13 +20,25 @@ class NexusStore {
     this.seedDefaultState();
   }
 
+  public reset() {
+    this.conversations.clear();
+    this.messages.clear();
+    this.executionRuns.clear();
+    this.toolLogs = [];
+    this.idempotencyKeys.clear();
+    this.memories.clear();
+    this.integrations.clear();
+    this.seedDefaultState();
+  }
+
   private seedDefaultState() {
-    // Initial Integrations state with Google Workspace and Supabase
+    // Honest Integrations state: unconfigured until real credentials or sandbox is toggled
     this.integrations.set('google_drive', {
       service: 'google_drive',
       name: 'Google Drive',
-      connected: true,
-      accountEmail: 'kelvinong.gggcontentlab@gmail.com',
+      connected: false,
+      mode: 'simulation',
+      accountEmail: 'sandbox@local.internal',
       lastSync: new Date().toISOString(),
       scopes: ['https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file'],
     });
@@ -34,8 +46,9 @@ class NexusStore {
     this.integrations.set('gmail', {
       service: 'gmail',
       name: 'Gmail',
-      connected: true,
-      accountEmail: 'kelvinong.gggcontentlab@gmail.com',
+      connected: false,
+      mode: 'simulation',
+      accountEmail: 'sandbox@local.internal',
       lastSync: new Date().toISOString(),
       scopes: ['https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/gmail.readonly'],
     });
@@ -43,8 +56,9 @@ class NexusStore {
     this.integrations.set('google_calendar', {
       service: 'google_calendar',
       name: 'Google Calendar',
-      connected: true,
-      accountEmail: 'kelvinong.gggcontentlab@gmail.com',
+      connected: false,
+      mode: 'simulation',
+      accountEmail: 'sandbox@local.internal',
       lastSync: new Date().toISOString(),
       scopes: ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.readonly'],
     });
@@ -53,7 +67,8 @@ class NexusStore {
       service: 'supabase',
       name: 'Supabase Storage',
       connected: !!process.env.SUPABASE_URL,
-      accountEmail: process.env.SUPABASE_URL ? 'project-cloud-cluster' : 'local-durable-vault',
+      mode: process.env.SUPABASE_URL ? 'production' : 'simulation',
+      accountEmail: process.env.SUPABASE_URL ? 'live-cloud-cluster' : 'local-durable-vault',
       lastSync: new Date().toISOString(),
       scopes: ['database.read', 'database.write', 'audit.log'],
     });
@@ -61,18 +76,16 @@ class NexusStore {
     this.integrations.set('telegram', {
       service: 'telegram',
       name: 'Telegram Dispatcher',
-      connected: true,
-      accountEmail: '@blacktower_nexus_bot',
+      connected: !!process.env.TELEGRAM_BOT_TOKEN,
+      mode: process.env.TELEGRAM_BOT_TOKEN ? 'production' : 'simulation',
+      accountEmail: process.env.TELEGRAM_BOT_TOKEN ? '@configured_bot' : '@sandbox_bot',
       lastSync: new Date().toISOString(),
       scopes: ['bot.send_message'],
     });
 
-    // Default persistent memory
-    this.setMemory('user_name', 'Kelvin', 'preference');
-    this.setMemory('recipient_kelvin', 'kelvinong.gggcontentlab@gmail.com', 'contact');
+    // Default neutral persistent rules (no hardcoded personal identities)
     this.setMemory('organization', 'BLACKTOWER™', 'project_context');
-    this.setMemory('language_preference', 'English with Malaysian Chinese friendliness', 'preference');
-    this.setMemory('executive_summary_format', 'Concise bullet points with verified status badges', 'rule');
+    this.setMemory('executive_summary_format', 'Structured bullet points with execution verification', 'rule');
   }
 
   // Conversation methods
@@ -169,7 +182,7 @@ class NexusStore {
     if (this.idempotencyKeys.has(key)) {
       return false; // Already executed
     }
-    this.idempotencyKeys.add(key);
+    this.idempotencyKeys.set(key, Date.now());
     return true; // Fresh key
   }
 

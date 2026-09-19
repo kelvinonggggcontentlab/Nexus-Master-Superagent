@@ -195,15 +195,20 @@ export const ObservabilityDrawer: React.FC<ObservabilityDrawerProps> = ({
                     </div>
                   </div>
 
-                  <span
-                    className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
-                      intg.connected
-                        ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400'
-                        : 'bg-rose-500/10 border border-rose-500/30 text-rose-400'
-                    }`}
-                  >
-                    {intg.connected ? 'Connected' : 'Offline'}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded font-mono text-slate-400 bg-white/[0.03] border border-white/[0.04]">
+                      {intg.mode === 'production' ? 'Live' : 'Sandbox'}
+                    </span>
+                    <span
+                      className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                        intg.connected
+                          ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400'
+                          : 'bg-slate-500/10 border border-slate-500/30 text-slate-400'
+                      }`}
+                    >
+                      {intg.connected ? 'Active' : 'Unlinked'}
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>

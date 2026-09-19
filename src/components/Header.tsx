@@ -1,5 +1,7 @@
-import React from 'react';
-import { Plus, History, Activity, Settings } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Plus, History, Activity, Settings, CheckCircle, AlertCircle, Sparkles } from 'lucide-react';
+import { auth, googleSignIn } from '../lib/googleAuth';
+import { User, onAuthStateChanged } from 'firebase/auth';
 
 interface HeaderProps {
   onNewChat: () => void;
@@ -15,6 +17,24 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenObservability,
   onOpenSettings,
 }) => {
+  const [authUser, setAuthUser] = useState<User | null>(auth.currentUser);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, user => {
+      setAuthUser(user);
+    });
+    return () => unsub();
+  }, []);
+
+  const handleQuickSignIn = async () => {
+    try {
+      await googleSignIn();
+    } catch (e) {
+      console.error(e);
+      onOpenSettings();
+    }
+  };
+
   return (
     <header className="sticky top-0 z-30 flex items-center justify-between px-4 sm:px-6 py-3.5 bg-[#090a0d]/90 backdrop-blur-md border-b border-white/[0.06]">
       {/* Brand Identity */}
@@ -47,8 +67,30 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Control Actions */}
-      <div className="flex items-center gap-1 sm:gap-2">
+      {/* Control Actions & Workspace Indicator */}
+      <div className="flex items-center gap-1.5 sm:gap-2">
+        {/* Workspace Quick-State Badge */}
+        {authUser ? (
+          <button
+            onClick={onOpenSettings}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 text-emerald-300 text-xs font-medium transition-all"
+            title={`Connected to Google Workspace as ${authUser.email}`}
+          >
+            <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline truncate max-w-[130px]">{authUser.displayName || 'Workspace Active'}</span>
+          </button>
+        ) : (
+          <button
+            id="btn-header-signin"
+            onClick={handleQuickSignIn}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 text-cyan-300 text-xs font-medium transition-all"
+            title="Connect Google Workspace (Drive, Gmail, Calendar)"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden sm:inline">Connect Google</span>
+          </button>
+        )}
+
         <button
           id="btn-new-chat"
           onClick={onNewChat}

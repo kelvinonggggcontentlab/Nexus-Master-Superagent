@@ -5,7 +5,19 @@ import { createServer as createViteServer } from 'vite';
 import { nexusStore } from './server/db/store';
 import { createExecutionPlan } from './server/agent/planner';
 import { agentRuntime } from './server/agent/runtime';
+import { contextEngine } from './server/context/contextEngine';
 import { ExecutionRun, NexusMessage } from './src/types/nexus';
+import {
+  listPersonalities,
+  getSessionPersonality,
+  setSessionPersonality,
+  resolvePersonality,
+} from './server/agent/personality';
+import {
+  getExecutionMode,
+  setExecutionMode,
+  setActiveBearerToken,
+} from './server/adapters';
 
 dotenv.config();
 
@@ -49,15 +61,74 @@ app.get('/api/conversations/:id/messages', (req, res) => {
   res.json({ messages });
 });
 
+// Context & Active Task for a conversation
+app.get('/api/conversations/:id/context', (req, res) => {
+  const activeTask = contextEngine.getActiveTask(req.params.id);
+  const entities = contextEngine.getEntities(req.params.id);
+  res.json({ activeTask, entities });
+});
+
+// Cancel active task in a conversation
+app.post('/api/conversations/:id/cancel', (req, res) => {
+  const cancelResult = contextEngine.cancelActiveTask(
+    req.params.id,
+    req.body.reason || 'User cancelled task'
+  );
+  res.json({ success: !!cancelResult, cancelResult });
+});
+
+// Personalities registry endpoints
+app.get('/api/personalities', (req, res) => {
+  res.json({
+    personalities: listPersonalities(),
+    default: 'malaysian_conversational',
+  });
+});
+
+app.get('/api/conversations/:id/personality', (req, res) => {
+  const personality = getSessionPersonality(req.params.id);
+  res.json({
+    conversationId: req.params.id,
+    personalityId: personality.id,
+    name: personality.name,
+    locale: personality.locale,
+    description: personality.description,
+  });
+});
+
+app.post('/api/conversations/:id/personality', (req, res) => {
+  const { personalityId } = req.body;
+  const personality = setSessionPersonality(req.params.id, personalityId);
+  res.json({
+    conversationId: req.params.id,
+    personalityId: personality.id,
+    name: personality.name,
+  });
+});
+
 // Primary Chat / Execution endpoint
 app.post('/api/chat', async (req, res) => {
   try {
-    const { conversationId, content, attachments } = req.body;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7).trim();
+      if (token) {
+        setActiveBearerToken(token);
+      }
+    }
+
+    const { conversationId, content, attachments, personality: requestedPersonality } = req.body;
     if (!content && (!attachments || attachments.length === 0)) {
       return res.status(400).json({ error: 'Message content or attachment required.' });
     }
 
     const conv = nexusStore.getOrCreateConversation(conversationId);
+
+    // Resolve personality (either explicit request or session preset, defaulting to Malaysian)
+    if (requestedPersonality) {
+      setSessionPersonality(conv.id, requestedPersonality);
+    }
+    const activePersonality = getSessionPersonality(conv.id);
 
     // 1. Record User Message
     const userMsg: NexusMessage = {
@@ -69,10 +140,13 @@ app.post('/api/chat', async (req, res) => {
     };
     nexusStore.addMessage(conv.id, userMsg);
 
-    // 2. Create Execution Plan (Gemini or heuristic)
-    const plan = await createExecutionPlan(userMsg.content, attachments);
+    // 2. Assemble Context (conversation, active task, references, intent, entities, personality)
+    const context = contextEngine.assembleContext(userMsg.content, conv.id, 'operator', activePersonality);
 
-    // 3. Initialize Execution Run
+    // 3. Create Execution Plan (Gemini or deterministic with context and dynamic personality)
+    const plan = await createExecutionPlan(userMsg.content, conv.id, context, activePersonality);
+
+    // 4. Initialize Execution Run
     const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
     const executionRun: ExecutionRun = {
       id: runId,
@@ -83,7 +157,7 @@ app.post('/api/chat', async (req, res) => {
       currentStepIndex: 0,
       stepsCompleted: 0,
       totalSteps: plan.steps.length,
-      activeStatusText: 'Synthesizing task graph...',
+      activeStatusText: plan.steps.length > 0 ? 'Synthesizing task graph...' : 'Processing contextual request...',
       results: {},
       verificationBadges: [],
       createdAt: new Date().toISOString(),
@@ -91,8 +165,8 @@ app.post('/api/chat', async (req, res) => {
     };
     nexusStore.saveExecutionRun(executionRun);
 
-    // 4. Execute Autonomous Workflow
-    const completedRun = await agentRuntime.executePlan(executionRun);
+    // 5. Execute Autonomous Workflow (passing context and dynamic personality)
+    const completedRun = await agentRuntime.executePlan(executionRun, undefined, context, activePersonality);
 
     // 5. Formulate Assistant Response
     const assistantMsg: NexusMessage = {
@@ -153,14 +227,30 @@ app.get('/api/observability', (req, res) => {
 // Integrations Status
 app.get('/api/integrations', (req, res) => {
   const integrations = nexusStore.getIntegrations();
-  res.json({ integrations });
+  const mode = getExecutionMode();
+  res.json({ integrations, mode });
 });
 
 // Toggle Integration (useful for testing failure recovery in simulation/sandbox)
 app.post('/api/integrations/toggle', (req, res) => {
   const { service, connected } = req.body;
   nexusStore.setIntegrationStatus(service, !!connected);
-  res.json({ success: true, integrations: nexusStore.getIntegrations() });
+  res.json({ success: true, integrations: nexusStore.getIntegrations(), mode: getExecutionMode() });
+});
+
+// Switch Execution Mode (simulation sandbox vs live Google Workspace production)
+app.get('/api/mode', (req, res) => {
+  res.json({ mode: getExecutionMode() });
+});
+
+app.post('/api/mode', (req, res) => {
+  const { mode } = req.body;
+  if (mode === 'simulation' || mode === 'production') {
+    setExecutionMode(mode);
+    res.json({ success: true, mode: getExecutionMode() });
+  } else {
+    res.status(400).json({ error: 'Invalid mode. Must be simulation or production.' });
+  }
 });
 
 // Memory API

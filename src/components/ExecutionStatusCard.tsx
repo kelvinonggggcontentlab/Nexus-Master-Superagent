@@ -50,10 +50,10 @@ export const ExecutionStatusCard: React.FC<ExecutionStatusCardProps> = ({
               {isRunning
                 ? executionRun.activeStatusText || 'Executing workflow...'
                 : isWaiting
-                ? 'Approval required to proceed'
+                ? 'Need your confirmation first boss'
                 : isFailed
-                ? 'Workflow interrupted'
-                : `${totalSteps}/${totalSteps} actions executed & verified`}
+                ? 'Workflow interrupted halfway'
+                : `Settle already boss! ${totalSteps}/${totalSteps} actions verified`}
             </span>
             <span className="text-[10px] text-slate-400 bg-white/[0.04] px-1.5 py-0.5 rounded border border-white/[0.06] flex-shrink-0">
               {completedCount}/{totalSteps} steps
@@ -103,7 +103,14 @@ export const ExecutionStatusCard: React.FC<ExecutionStatusCardProps> = ({
                   </span>
 
                   <div>
-                    <div className="font-medium text-slate-200">{step.title}</div>
+                    <div className="font-medium text-slate-200 flex items-center gap-1.5">
+                      <span>{step.title}</span>
+                      {step.verificationDetails?.isSimulated && (
+                        <span className="text-[9px] font-mono text-cyan-400/80 bg-cyan-950/40 px-1 py-0.2 rounded border border-cyan-800/30">
+                          Sandbox
+                        </span>
+                      )}
+                    </div>
                     <div className="text-[11px] text-slate-400">{step.description}</div>
                     {step.verificationDetails?.message && (
                       <div className="text-[10px] text-emerald-400/90 mt-0.5 flex items-center gap-1">
@@ -131,7 +138,7 @@ export const ExecutionStatusCard: React.FC<ExecutionStatusCardProps> = ({
             <div className="mt-3 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
               <p className="font-medium mb-1">Confirmation Required for Destructive Action</p>
               <p className="text-[11px] text-amber-300/80 mb-2.5">
-                This operation modifies or deletes persistent records. Do you authorize execution?
+                This operation will delete or modify persistent records ya. Confirm want to proceed boss?
               </p>
               <div className="flex gap-2">
                 <button
@@ -141,7 +148,7 @@ export const ExecutionStatusCard: React.FC<ExecutionStatusCardProps> = ({
                   }}
                   className="px-3 py-1 bg-amber-500 hover:bg-amber-600 text-black font-semibold rounded text-xs transition-all"
                 >
-                  Confirm & Execute
+                  Confirm & Settle
                 </button>
                 <button
                   onClick={() => {

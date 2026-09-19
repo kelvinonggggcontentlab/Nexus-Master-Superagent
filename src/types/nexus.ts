@@ -7,6 +7,7 @@ export type TaskStatus =
   | 'completed' 
   | 'failed' 
   | 'waiting_confirmation' 
+  | 'cancelled'
   | 'replanning';
 
 export interface ToolDefinition {
@@ -41,6 +42,7 @@ export interface TaskStep {
     verificationId?: string;
     verifiedAt?: string;
     message?: string;
+    isSimulated?: boolean;
   };
   startedAt?: string;
   completedAt?: string;
@@ -70,10 +72,12 @@ export interface ExecutionRun {
   verificationBadges: Array<{
     label: string;
     verified: boolean;
+    isSimulated?: boolean;
     timestamp?: string;
   }>;
   finalResponse?: string;
   error?: string;
+  isSimulated?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -86,6 +90,7 @@ export interface ToolCallLog {
   parameters: Record<string, any>;
   result: any;
   status: 'success' | 'failed';
+  isSimulated?: boolean;
   error?: string;
   durationMs: number;
   idempotencyKey?: string;
@@ -127,6 +132,7 @@ export interface IntegrationAccount {
   service: 'google_drive' | 'gmail' | 'google_calendar' | 'supabase' | 'telegram';
   name: string;
   connected: boolean;
+  mode?: 'simulation' | 'production';
   accountEmail?: string;
   lastSync?: string;
   scopes: string[];

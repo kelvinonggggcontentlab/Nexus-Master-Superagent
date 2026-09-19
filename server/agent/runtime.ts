@@ -1,26 +1,90 @@
-import { GoogleGenAI } from '@google/genai';
-import { ExecutionRun, TaskStep } from '../../src/types/nexus';
+import { ExecutionRun, TaskStep, TaskStatus } from '../../src/types/nexus';
 import { nexusStore } from '../db/store';
 import { executeToolCall } from '../tools/registry';
-
-// Lazy initialized Gemini client for natural synthesis
-let geminiClient: GoogleGenAI | null = null;
-function getGemini(): GoogleGenAI | null {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key || key === 'MY_GEMINI_API_KEY' || key.startsWith('MY_')) {
-    return null;
-  }
-  if (!geminiClient) {
-    geminiClient = new GoogleGenAI({ apiKey: key });
-  }
-  return geminiClient;
-}
+import { AssembledContext } from '../context/types';
+import { contextEngine } from '../context/contextEngine';
+import {
+  getGemini,
+  isGeminiQuotaExhausted,
+  markQuotaExhausted,
+  isQuotaOrRateLimitError,
+} from '../geminiService';
+import {
+  SystemPersonality,
+  resolvePersonality,
+} from './personality';
 
 export class NexusAgentRuntime {
   public async executePlan(
     run: ExecutionRun,
-    onProgress?: (run: ExecutionRun) => void
+    onProgress?: (run: ExecutionRun) => void,
+    context?: AssembledContext,
+    personality?: SystemPersonality | string
   ): Promise<ExecutionRun> {
+    const activeContext =
+      context || contextEngine.assembleContext(run.userPrompt, run.conversationId);
+    const effectivePersonality = resolvePersonality(
+      personality || activeContext.personality,
+      run.conversationId
+    );
+    if (!activeContext.personality) {
+      activeContext.personality = effectivePersonality;
+    }
+
+    // 1. Handle zero-step operations (Cancellation, Queries, Clarifications)
+    if (run.plan.steps.length === 0) {
+      if (activeContext.intent === 'CANCEL_TASK') {
+        run.status = 'cancelled';
+        const cancelRes = contextEngine.cancelActiveTask(run.conversationId, 'User aborted task');
+        run.finalResponse =
+          cancelRes?.report || 'Task cancelled. No pending write actions executed.';
+        run.activeStatusText = 'Task cancelled.';
+        run.updatedAt = new Date().toISOString();
+        nexusStore.saveExecutionRun(run);
+        if (onProgress) onProgress(run);
+        return run;
+      }
+
+      if (activeContext.intent === 'QUERY_RESULT') {
+        run.status = 'completed';
+        run.finalResponse =
+          activeContext.directAnswer ||
+          contextEngine.answerQueryFromContext(
+            run.userPrompt,
+            activeContext.activeTask,
+            activeContext.relevantEntities
+          );
+        run.activeStatusText = 'Query answered from verified session context.';
+        run.updatedAt = new Date().toISOString();
+        nexusStore.saveExecutionRun(run);
+        if (onProgress) onProgress(run);
+        return run;
+      }
+
+      if (activeContext.intent === 'CLARIFY') {
+        run.status = 'completed';
+        run.finalResponse =
+          activeContext.clarificationQuestion ||
+          'Multiple candidates exist in context. Please clarify your request.';
+        run.activeStatusText = 'Clarification requested.';
+        run.updatedAt = new Date().toISOString();
+        nexusStore.saveExecutionRun(run);
+        if (onProgress) onProgress(run);
+        return run;
+      }
+
+      if (activeContext.intent === 'MODIFY_TASK') {
+        run.status = 'completed';
+        const modifiedTask = contextEngine.getActiveTask(run.conversationId);
+        run.finalResponse = `Task updated with new parameters.\nActive modifications recorded: ${modifiedTask?.userModifications.join(', ') || 'Updated'}`;
+        run.activeStatusText = 'Task parameters updated.';
+        run.updatedAt = new Date().toISOString();
+        nexusStore.saveExecutionRun(run);
+        if (onProgress) onProgress(run);
+        return run;
+      }
+    }
+
     run.status = 'in_progress';
     run.updatedAt = new Date().toISOString();
     nexusStore.saveExecutionRun(run);
@@ -29,6 +93,18 @@ export class NexusAgentRuntime {
     const stepResults: Record<string, any> = {};
 
     for (let i = 0; i < run.plan.steps.length; i++) {
+      // Check if user cancelled in flight
+      const currentActive = contextEngine.getActiveTask(run.conversationId);
+      if (currentActive && currentActive.status === 'cancelled') {
+        run.status = 'cancelled';
+        run.finalResponse =
+          currentActive.cancellationReason || 'Execution halted: Task cancelled by user.';
+        run.activeStatusText = 'Task cancelled.';
+        nexusStore.saveExecutionRun(run);
+        if (onProgress) onProgress(run);
+        return run;
+      }
+
       const step = run.plan.steps[i];
       run.currentStepIndex = i;
       run.activeStatusText = `${step.title}...`;
@@ -57,92 +133,132 @@ export class NexusAgentRuntime {
         run.status = 'waiting_confirmation';
         run.activeStatusText = `Awaiting authorization for: ${step.title}`;
         nexusStore.saveExecutionRun(run);
+        contextEngine.recordExecutionRun(run, run.conversationId);
         if (onProgress) onProgress(run);
         return run;
       }
 
-      // Context Propagation: resolve dynamic parameters from previous step results
-      const resolvedParameters = this.resolveStepParameters(step, stepResults);
+      // Context Propagation: resolve dynamic parameters from previous step results AND contextual references
+      const resolvedParameters = this.resolveStepParameters(step, stepResults, activeContext, run);
 
       // Execute tool call
       let toolResult = await executeToolCall(step.tool, resolvedParameters, run.id);
 
-      // Dynamic Replanning: if search returns 0 results, retry with broader parameters
+      // Dynamic Replanning: if search returns 0 results, retry with first significant token
       if (step.tool === 'search_drive' && toolResult.success && toolResult.data?.foundCount === 0) {
-        run.status = 'replanning';
-        run.activeStatusText = `Refining search query for "${resolvedParameters.query}"...`;
-        nexusStore.saveExecutionRun(run);
-        if (onProgress) onProgress(run);
+        const originalQuery = String(resolvedParameters.query || '').trim();
+        const fallbackWord = originalQuery.split(/\s+/)[0];
+        if (fallbackWord && fallbackWord.toLowerCase() !== originalQuery.toLowerCase()) {
+          run.activeStatusText = `Zero matches for "${originalQuery}". Replanning search with "${fallbackWord}"...`;
+          nexusStore.saveExecutionRun(run);
+          if (onProgress) onProgress(run);
 
-        // Broaden search query to general keywords
-        const broaderParams = { query: 'invoice' };
-        toolResult = await executeToolCall('search_drive', broaderParams, run.id);
-        if (toolResult.success) {
-          run.status = 'in_progress';
+          const retryResult = await executeToolCall(
+            'search_drive',
+            { query: fallbackWord },
+            run.id
+          );
+          if (retryResult.success && retryResult.data?.foundCount > 0) {
+            toolResult = retryResult;
+            step.description += ` (Auto-recovered using query: "${fallbackWord}")`;
+          }
         }
       }
 
       if (!toolResult.success) {
         step.status = 'failed';
+        step.completedAt = new Date().toISOString();
         step.error = toolResult.error || 'Execution failed';
         run.status = 'failed';
-        run.error = `Failed at step ${step.stepNumber} (${step.title}): ${toolResult.error}`;
-        run.activeStatusText = `Execution interrupted: ${step.title} failed.`;
+        run.error = `Step ${step.stepNumber} (${step.title}) failed: ${step.error}`;
+        nexusStore.saveExecutionRun(run);
+        if (onProgress) onProgress(run);
         break;
       }
 
+      // Success & Verification recording
       step.status = 'verified';
       step.completedAt = new Date().toISOString();
       step.result = toolResult.data;
+      step.verificationDetails = toolResult.verification;
+
       stepResults[step.id] = toolResult.data;
+      run.results[step.tool] = toolResult.data;
+      run.stepsCompleted = i + 1;
 
       if (toolResult.verification) {
-        step.verificationDetails = toolResult.verification;
         run.verificationBadges.push({
-          label: toolResult.verification.message || `${step.title} verified`,
-          verified: true,
-          timestamp: new Date().toISOString(),
+          label: toolResult.verification.message,
+          verified: toolResult.verification.verified,
+          isSimulated: toolResult.verification.isSimulated,
+          timestamp: toolResult.verification.timestamp,
         });
       }
 
-      run.stepsCompleted++;
-      run.results = { ...run.results, [step.tool]: toolResult.data };
       nexusStore.saveExecutionRun(run);
       if (onProgress) onProgress(run);
     }
 
     // Final assessment & response synthesis
-    if (run.status === 'in_progress' || run.status === 'replanning') {
+    if ((run.status as TaskStatus) !== 'failed') {
       run.status = 'completed';
       run.activeStatusText = 'Execution verified and completed.';
-      run.finalResponse = await this.generateFinalResponse(run);
-    } else if (run.status === 'failed') {
-      run.finalResponse = this.generateFailureResponse(run);
+      run.finalResponse = await this.generateFinalResponse(run, activeContext, effectivePersonality);
+    } else {
+      run.finalResponse = this.generateFailureResponse(run, effectivePersonality);
     }
 
     run.updatedAt = new Date().toISOString();
     nexusStore.saveExecutionRun(run);
+
+    // Sync state and entities back to ContextEngine
+    contextEngine.recordExecutionRun(run, run.conversationId);
+
     if (onProgress) onProgress(run);
     return run;
   }
 
-  // Dynamic Context Propagation: maps outputs of parent steps into child step inputs
-  private resolveStepParameters(step: TaskStep, stepResults: Record<string, any>): Record<string, any> {
+  // Dynamic Context Propagation: maps outputs of parent steps OR active contextual state into child step inputs
+  private resolveStepParameters(
+    step: TaskStep,
+    stepResults: Record<string, any>,
+    context?: AssembledContext,
+    run?: ExecutionRun
+  ): Record<string, any> {
     const params = { ...step.parameters };
 
+    // Fallback for calculate tool if expression was not resolved
+    if (step.tool === 'calculate' && (!params.expression || params.expression === 'undefined' || params.expression === 'auto')) {
+      const match = ((run?.userPrompt || '') + ' ' + (step.description || '') + ' ' + (step.title || '')).match(/(\d+(?:\.\d+)?(?:\s*[\+\-\*\/\%]\s*\d+(?:\.\d+)?)+)/);
+      if (match) {
+        params.expression = match[1].trim();
+      }
+    }
+
+    // 1. Check parent step results
     for (const depId of step.dependencies) {
       const depData = stepResults[depId];
       if (!depData) continue;
 
-      // Feed file ID from search_drive to read_drive_file or move_drive_file
-      if ((step.tool === 'read_drive_file' || step.tool === 'move_drive_file' || step.tool === 'delete_drive_file') && (!params.fileId || params.fileId === 'file_mb_8812')) {
+      // Feed file ID from search_drive or get_file_metadata to downstream file tools
+      if (
+        (step.tool === 'read_drive_file' ||
+          step.tool === 'move_drive_file' ||
+          step.tool === 'delete_drive_file') &&
+        (!params.fileId || params.fileId === 'auto')
+      ) {
         if (depData.files && depData.files.length > 0) {
           params.fileId = depData.files[0].id;
+        } else if (depData.id) {
+          params.fileId = depData.id;
         }
       }
 
-      // Feed document content to analyze_document
-      if (step.tool === 'analyze_document' && !params.documentText) {
+      // Feed document content from read_drive_file to analyze_document
+      if (
+        step.tool === 'analyze_document' &&
+        (!params.documentText || params.documentText === 'auto')
+      ) {
         if (depData.content) {
           params.documentText = depData.content;
         }
@@ -150,225 +266,321 @@ export class NexusAgentRuntime {
 
       // Feed free slot from check_calendar to create_calendar_event
       if (step.tool === 'create_calendar_event') {
-        if (depData.firstFreeOneHourSlot) {
+        if (depData.firstFreeOneHourSlot && (!params.start || params.start.includes('TBD'))) {
           const slot = depData.firstFreeOneHourSlot;
-          params.start = `2026-09-18T${slot.start}:00+08:00`;
-          params.end = `2026-09-18T${slot.end}:00+08:00`;
+          const date =
+            depData.dateChecked && depData.dateChecked !== 'tomorrow'
+              ? depData.dateChecked
+              : '2026-09-18';
+          params.start = `${date}T${slot.start}:00+08:00`;
+          params.end = `${date}T${slot.end}:00+08:00`;
         }
+      }
+
+      // Feed analysis or calculation output into email body if needed
+      if (
+        (step.tool === 'send_email' || step.tool === 'draft_email') &&
+        params.body &&
+        params.body.includes('{{summary}}')
+      ) {
+        let replacement = '';
+        if (depData.summaryLines && depData.summaryLines.length > 0) {
+          replacement = depData.summaryLines.join('\n');
+        } else if (depData.formattedResult) {
+          replacement = `Calculated Result: ${depData.formattedResult}`;
+        }
+        params.body = params.body.replace(
+          '{{summary}}',
+          replacement || 'Document summarized successfully.'
+        );
+      }
+    }
+
+    // 2. If parameters are still unresolved ('auto'), check context resolvedReferences & activeTask
+    if (
+      (step.tool === 'read_drive_file' ||
+        step.tool === 'move_drive_file' ||
+        step.tool === 'delete_drive_file') &&
+      (!params.fileId || params.fileId === 'auto')
+    ) {
+      if (context?.resolvedReferences?.target_file?.identifier) {
+        params.fileId = context.resolvedReferences.target_file.identifier;
+      } else if (context?.activeTask?.toolResults?.search_drive?.files?.[0]?.id) {
+        params.fileId = context.activeTask.toolResults.search_drive.files[0].id;
+      }
+    }
+
+    // If email body still has '{{summary}}', check activeTask or context
+    if (
+      (step.tool === 'send_email' || step.tool === 'draft_email') &&
+      params.body &&
+      params.body.includes('{{summary}}')
+    ) {
+      let replacement = '';
+      if (context?.activeTask?.toolResults?.analyze_document?.summaryLines) {
+        replacement = context.activeTask.toolResults.analyze_document.summaryLines.join('\n');
+      } else if (context?.resolvedReferences?.summary?.data?.summaryLines) {
+        replacement = context.resolvedReferences.summary.data.summaryLines.join('\n');
+      }
+      if (replacement) {
+        params.body = params.body.replace('{{summary}}', replacement);
       }
     }
 
     return params;
   }
 
-  private async generateFinalResponse(run: ExecutionRun): Promise<string> {
-    // 1. Try Gemini-powered synthesis if available
+  private async generateFinalResponse(
+    run: ExecutionRun,
+    context?: AssembledContext,
+    personality?: SystemPersonality
+  ): Promise<string> {
+    const effectivePersonality = personality || resolvePersonality(context?.personality, run.conversationId);
     const ai = getGemini();
-    if (ai) {
+    if (ai && !isGeminiQuotaExhausted()) {
       try {
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: `You are NEXUS MASTER SUPERAGENT™ by BLACKTOWER™.
+        const timeoutPromise = new Promise<null>((_, reject) =>
+          setTimeout(() => reject(new Error('Gemini synthesis timed out')), 2500)
+        );
+
+        const promptText = `You are NEXUS MASTER SUPERAGENT™.
+${effectivePersonality.buildPromptSection('runtime_synthesis')}
+
 The user requested: "${run.userPrompt}".
-The autonomous workflow completed all steps successfully with these tool execution results:
+Active Intent: ${context?.intent || 'TASK_EXECUTION'}
+The execution steps completed with these results:
 ${JSON.stringify(run.results, null, 2)}
 
 Verification Badges:
-${run.verificationBadges.map(b => `• ${b.label}`).join('\n')}
+${run.verificationBadges.map(b => `• ${b.label} (Simulated: ${b.isSimulated ? 'yes' : 'no'})`).join('\n')}
 
-Synthesize an executive, crisp, professional operator response.
+Synthesize a helpful, conversational response adhering strictly to the personality instructions.
 Rules:
-- State direct functional outcomes with exact data (numbers, dates, file names, email recipients).
-- Include verified checkmarks at the end.
-- Speak with calm, authoritative confidence (NEXUS tone: "Done.", "Checked.", "Scheduled.").
-- Keep it concise, scannable, and clean.`,
+- State direct functional outcomes with exact data from results (amounts, filenames, dates, recipients).
+- Clearly denote if actions were verified in simulation sandbox or live environment.
+- Do not make false claims of external third-party certifications when running in simulation.
+- Keep it concise, scannable, and clean.`;
+
+        const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-flash-latest'];
+        let response: any = null;
+
+        for (const model of modelsToTry) {
+          try {
+            const generatePromise = ai.models.generateContent({
+              model,
+              contents: [
+                {
+                  role: 'user',
+                  parts: [{ text: promptText }],
                 },
               ],
-            },
-          ],
-          config: {
-            temperature: 0.2,
-          },
-        });
+              config: {
+                temperature: 0.2,
+              },
+            });
 
-        if (response.text && response.text.trim().length > 0) {
-          return response.text.trim();
+            response = await Promise.race([generatePromise, timeoutPromise]);
+            if (response?.text && response.text.trim().length > 0) {
+              return response.text.trim();
+            }
+          } catch (err: any) {
+            if (isQuotaOrRateLimitError(err)) {
+              markQuotaExhausted(60000);
+              break;
+            }
+          }
         }
-      } catch (err) {
-        console.warn('Gemini response synthesis fallback:', err);
+      } catch (err: any) {
+        if (isQuotaOrRateLimitError(err)) {
+          markQuotaExhausted(60000);
+        } else {
+          console.info('Using deterministic response synthesis fallback:', err?.message || 'timeout');
+        }
       }
     }
 
-    // 2. High-Precision Deterministic Operator Synthesis
-    return this.synthesizeDeterministicResponse(run);
+    // Deterministic Operator Synthesis based on actual runtime results
+    return this.synthesizeDeterministicResponse(run, effectivePersonality);
   }
 
-  private synthesizeDeterministicResponse(run: ExecutionRun): string {
-    const p = run.userPrompt.toLowerCase();
+  private synthesizeDeterministicResponse(run: ExecutionRun, personality?: SystemPersonality): string {
+    const effectivePersonality = personality || resolvePersonality(undefined, run.conversationId);
     const results = run.results || {};
 
-    // Response A: Mathematical / Financial Calculation
+    // 1. Mathematical / Financial Calculation
     if (results.calculate) {
       const calc = results.calculate;
-      return `Done.
-
-Calculation Result:
-• Expression: ${calc.expression}
-• Verified Output: MYR ${calc.formattedResult}
-
-✓ Arithmetic verified
-✓ Audit trail recorded`;
+      if (effectivePersonality.formatCalculationResult) {
+        return effectivePersonality.formatCalculationResult(
+          calc.expression,
+          calc.formattedResult,
+          calc.label
+        );
+      }
+      return `Calculation done:\n• Expression: ${calc.expression}\n• Computed Result: ${calc.formattedResult} ${calc.label ? `(${calc.label})` : ''}\n\n✓ Arithmetic verified`;
     }
 
-    // Response B: Calendar Booking
+    // 2. Draft Email (Prepared, not dispatched)
+    if (results.draft_email) {
+      const draft = results.draft_email;
+      if (effectivePersonality.formatDraftResult) {
+        return effectivePersonality.formatDraftResult(
+          draft.recipient,
+          draft.subject,
+          (draft.body || '').substring(0, 150)
+        );
+      }
+      return `Prepared Email Draft:\n• Recipient: ${draft.recipient}\n• Subject: "${draft.subject}"\n• Status: Saved as draft in sandbox (Not sent yet)\n\n✓ Draft prepared`;
+    }
+
+    // 3. Calendar Event Creation
     if (results.create_calendar_event) {
       const evt = results.create_calendar_event;
-      return `Done. Meeting booked on Google Calendar.
-
-• Event: ${evt.title}
-• Time: ${evt.start}
-• Attendees: ${(evt.attendees || []).join(', ')}
-• Meeting Location: Google Meet
-
-✓ Calendar slot verified
-✓ Invitations dispatched`;
+      if (effectivePersonality.formatCalendarResult) {
+        return effectivePersonality.formatCalendarResult(
+          evt.title,
+          evt.start,
+          evt.end,
+          evt.attendees || []
+        );
+      }
+      return `Calendar event booked:\n• Title: ${evt.title}\n• Time: ${evt.start} – ${evt.end}\n\n✓ Event scheduled`;
     }
 
-    // Response C: Calendar Availability Check
+    // 4. Calendar Check
     if (results.check_calendar) {
       const cal = results.check_calendar;
-      return `Schedule checked for ${cal.dateChecked}.
-
-You have ${cal.scheduledEventsCount} confirmed commitments tomorrow. I identified 3 optimal free windows:
-• 10:30 AM – 12:00 PM (Recommended: 90 mins uninterrupted)
-• 12:00 PM – 2:00 PM (Lunch window)
-• 3:00 PM – 4:30 PM (Afternoon focus slot)
-
-✓ Calendar index verified
-✓ Conflict scan complete`;
+      const slots = (cal.availableFreeSlots || [])
+        .slice(0, 3)
+        .map((s: any) => `• ${s.start} – ${s.end} (${s.durationMinutes} mins: ${s.note})`)
+        .join('\n');
+      const prefix = effectivePersonality.linguisticPatterns.salutations?.includes('boss')
+        ? `Checked your schedule for ${cal.dateChecked} already boss.\n\nGot ${cal.scheduledEventsCount} existing commitment(s) on record.`
+        : `Checked schedule for ${cal.dateChecked}.\n\nExisting commitment(s): ${cal.scheduledEventsCount}.`;
+      return `${prefix}\nAvailable open slots:\n${slots || 'No open slots found.'}\n\n✓ Availability scan verified`;
     }
 
-    // Response D: Invoice Search + Email to Kelvin
+    // 5. File Search + Email Workflow
     if (results.send_email && results.search_drive) {
-      return `Done.
+      const drive = results.search_drive;
+      const email = results.send_email;
+      const file = drive.files?.[0];
+      const analysis = results.analyze_document;
 
-Retrieved Maybank Tax Invoice INV-2026-8812 from Drive (/Finance/Invoices/2026) and dispatched executive summary to kelvinong.gggcontentlab@gmail.com.
+      let summaryInfo = '';
+      if (analysis?.summaryLines?.length > 0) {
+        summaryInfo = analysis.summaryLines.map((l: string) => `• ${l}`).join('\n');
+      }
 
-Summary Dispatched:
-• Invoice: INV-2026-8812
-• Amount: MYR 45,900.00 (inclusive of 8% SST: MYR 3,400.00)
-• Due Date: 30 September 2026
-• Recipient: kelvinong.gggcontentlab@gmail.com
+      if (effectivePersonality.formatDispatchedResult) {
+        return effectivePersonality.formatDispatchedResult(
+          file ? file.name : 'requested document',
+          email.recipient,
+          summaryInfo,
+          email.messageId
+        );
+      }
 
-✓ Drive file verified
-✓ Email delivery confirmed`;
+      return `Found "${file ? file.name : 'document'}" in Drive and emailed summary to ${email.recipient}.\n\n• Recipient: ${email.recipient}\n• Status: Dispatched\n• Message ID: ${email.messageId}\n\n✓ Workflow completed`;
     }
 
-    // Response E: Standalone Email Search
+    // 6. Standalone Email Search
     if (results.search_emails) {
       const emailRes = results.search_emails;
       const first = emailRes.emails?.[0];
-      return `Inbox query completed. Found ${emailRes.count} matching message(s).
-
-${first ? `Latest Thread:\n• From: ${first.from}\n• Subject: "${first.subject}"\n• Date: ${first.date}\n• Summary: ${first.snippet}` : 'No new matching threads found.'}
-
-✓ Gmail search verified`;
+      const particle = effectivePersonality.linguisticPatterns.particles?.includes('lah') ? ' lah' : '';
+      return `Inbox checked! Found ${emailRes.count} matching message(s)${particle}.\n\n${first ? `Latest Message:\n• From: ${first.from}\n• Subject: "${first.subject}"\n• Date: ${first.date}\n• Preview: ${first.snippet}` : 'No matching messages located inside.'}\n\n✓ Inbox query verified`;
     }
 
-    // Response F: Standalone Email Sent
+    // 7. Standalone Email Sent
     if (results.send_email) {
       const mail = results.send_email;
-      return `Done. Message dispatched via Gmail.
-
-• Recipient: ${mail.recipient}
-• Subject: "${mail.subject}"
-• Message ID: ${mail.messageId}
-
-✓ Email delivered
-✓ Outbound queue verified`;
+      return `Sent successfully. Message dispatched smoothly.\n\n• Recipient: ${mail.recipient}\n• Subject: "${mail.subject}"\n• Message ID: ${mail.messageId}\n\n✓ Outbound dispatch verified`;
     }
 
-    // Response G: Document Diff / Comparison
-    if (results.analyze_document && p.includes('compare')) {
-      return `Done.
-
-Retrieved BLACKTOWER Strategic Masterplan Revision 1.0 and Revision 2.1 from Drive.
-
-Key Updates in Revision 2.1:
-• Added NEXUS Master Superagent autonomous deployment architecture
-• Incorporated zero-compromise security enclave specifications
-• Configured Supabase durable multi-tenant persistent layer
-• Target release scheduled for Q4 2026
-
-✓ Drive files compared
-✓ Version delta verified`;
+    // 8. Document Analysis / Summary
+    if (results.analyze_document) {
+      const doc = results.analyze_document;
+      let text = `Document analysis complete:\n• Lines: ${doc.lineCount} | Words: ${doc.wordCount}\n`;
+      if (doc.summaryLines && doc.summaryLines.length > 0) {
+        text += `\nKey Highlights:\n${doc.summaryLines.map((l: string) => `• ${l}`).join('\n')}\n`;
+      }
+      if (doc.comparison) {
+        text += `\n${doc.comparison.diffSummary}\n`;
+      }
+      return `${text}\n✓ Analysis verified`;
     }
 
-    // Response H: Drive File Move / Reorganize
+    // 9. Drive File Search only
+    if (results.search_drive) {
+      const drive = results.search_drive;
+      const count = drive.foundCount || 0;
+      if (count === 0) {
+        return 'Cannot find any matching files in Drive.';
+      }
+      const fileList = (drive.files || [])
+        .map((f: any) => `• ${f.name} (ID: ${f.id}, Folder: ${f.folder})`)
+        .join('\n');
+      return `Found ${count} matching file(s) in Drive:\n${fileList}\n\n✓ Search verified`;
+    }
+
+    // 10. File Move
     if (results.move_drive_file) {
       const mv = results.move_drive_file;
-      return `可以，NEXUS settle。
-
-The file "${mv.name}" has been moved to ${mv.newFolder}.
-
-✓ Location updated
-✓ Destination verified`;
+      return `Moved successfully. The file "${mv.name}" is now in: ${mv.newFolder}.\n\n✓ Location verified`;
     }
 
-    // Response I: Drive File Creation
+    // 11. File Deletion
+    if (results.delete_drive_file) {
+      const del = results.delete_drive_file;
+      return `Deleted successfully. File "${del.name}" (ID: ${del.id}) permanently removed from Drive.\n\n✓ Target removal verified`;
+    }
+
+    // 12. File Creation
     if (results.create_drive_file) {
       const cr = results.create_drive_file;
-      return `Done. Document generated and saved to Drive.
-
-• File Name: ${cr.name}
-• Directory: ${cr.folder}
-• File Size: ${(cr.sizeBytes / 1024).toFixed(1)} KB
-
-✓ Drive file created
-✓ Storage index verified`;
+      return `Created successfully. Document "${cr.name}" created in ${cr.folder} (${cr.sizeBytes} bytes).\n\n✓ File created`;
     }
 
-    // Response J: Memory Save / Recall
+    // 13. Memory
     if (results.update_memory) {
       const mem = results.update_memory;
-      return `Done. Saved to persistent memory:
-"${mem.key}" = "${mem.value}".
-
-✓ Memory store updated`;
+      return `Remembered successfully.\nPersisted: "${mem.key}" = "${mem.value}"\n\n✓ Memory updated`;
     }
-
     if (results.recall_memory) {
       const mem = results.recall_memory;
-      return `Retrieved from memory:
-• ${mem.key}: ${mem.value}
-
-✓ Memory verified`;
+      return `Checked memory:\n• ${mem.key}: ${mem.value}\n\n✓ Memory retrieved`;
     }
 
-    // Default Fallback Response with all verification badges
+    // Default Fallback
     const badges = run.verificationBadges.map(b => `✓ ${b.label}`).join('\n');
-    return `Done. All requested workflow steps executed and verified.
-
-${badges || '✓ Actions verified'}`;
+    const affirmation = effectivePersonality.linguisticPatterns.affirmations?.[0] || 'Done';
+    return `${affirmation}\n\n${badges || '✓ Steps executed successfully.'}`;
   }
 
-  private generateFailureResponse(run: ExecutionRun): string {
-    const completedSteps = run.plan.steps.filter(s => s.status === 'verified' || s.status === 'completed');
+  private generateFailureResponse(run: ExecutionRun, personality?: SystemPersonality): string {
+    const effectivePersonality = personality || resolvePersonality(undefined, run.conversationId);
+    const completedSteps = run.plan.steps
+      .filter(s => s.status === 'verified' || s.status === 'completed')
+      .map(s => s.title);
     const failedStep = run.plan.steps.find(s => s.status === 'failed');
 
-    let text = `Not fully done.\n\n`;
+    if (effectivePersonality.formatFailure) {
+      return effectivePersonality.formatFailure(
+        completedSteps,
+        failedStep?.title,
+        failedStep?.error || run.error
+      );
+    }
+
+    let text = `Workflow interrupted.\n\n`;
     if (completedSteps.length > 0) {
-      text += `Completed:\n${completedSteps.map(s => `✓ ${s.title}`).join('\n')}\n\n`;
+      text += `Completed before issue:\n${completedSteps.map(s => `✓ ${s}`).join('\n')}\n\n`;
     }
     if (failedStep) {
-      text += `Failed:\n✗ ${failedStep.title}\nReason: ${failedStep.error || run.error}\n\n`;
+      text += `Failed Step:\n✗ ${failedStep.title}\nError: ${failedStep.error || run.error}\n\n`;
     }
-    text += `Pending actions halted to prevent inconsistent state.`;
+    text += `Subsequent actions halted to preserve state.`;
     return text;
   }
 }

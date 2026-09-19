@@ -12,8 +12,8 @@ interface MessageListProps {
 
 const SAMPLE_COMMANDS = [
   {
-    title: 'Find Maybank Invoice & Email Kelvin',
-    prompt: 'Find the latest Maybank invoice from Drive, summarize it, then email the summary to Kelvin.',
+    title: 'Find Invoice & Email Summary',
+    prompt: 'Find the latest Maybank invoice from Drive, summarize it, then email the summary to operator@example.com.',
     tag: 'Drive + Gmail',
   },
   {
@@ -22,18 +22,18 @@ const SAMPLE_COMMANDS = [
     tag: 'Calendar',
   },
   {
-    title: 'Book Roadmap Review with Kelvin',
-    prompt: 'Check calendar tomorrow and book 1 hour for roadmap review at 11am with Kelvin.',
+    title: 'Book Roadmap Review',
+    prompt: 'Check calendar tomorrow and book 1 hour for roadmap review at 11am with team.',
     tag: 'Schedule',
   },
   {
     title: 'Calculate 8% SST on Invoice',
-    prompt: 'Calculate 8% tax on 45,900 for the Maybank billing statement.',
+    prompt: 'Calculate 8% tax on 45,900 for the billing statement.',
     tag: 'Financial',
   },
   {
-    title: 'Compare BLACKTOWER Documents',
-    prompt: 'Search my Drive for the latest BLACKTOWER document and compare it with the previous version.',
+    title: 'Compare Strategic Documents',
+    prompt: 'Search my Drive for the latest Strategic Masterplan document and compare it with the previous version.',
     tag: 'Analysis',
   },
   {
@@ -70,10 +70,10 @@ export const MessageList: React.FC<MessageListProps> = ({
 
         {/* Minimal Greeting */}
         <h1 className="text-2xl sm:text-3xl font-semibold text-slate-100 tracking-tight text-center mb-2">
-          What's on your mind?
+          Apa macam boss, what need help today?
         </h1>
         <p className="text-xs sm:text-sm text-slate-400 text-center max-w-md mb-8">
-          Type your natural language command. NEXUS will plan, execute across Workspace, and verify results.
+          Just tell me what you need done lah. NEXUS will plan, execute across Workspace, and settle everything for you.
         </p>
 
         {/* Sample Command Chips */}

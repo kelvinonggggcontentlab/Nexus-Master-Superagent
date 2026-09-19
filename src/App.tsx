@@ -7,6 +7,7 @@ import { HistoryDrawer } from './components/HistoryDrawer';
 import { SettingsModal } from './components/SettingsModal';
 import { InteractiveBackground } from './components/InteractiveBackground';
 import { ConversationSession, NexusMessage } from './types/nexus';
+import { getAccessToken } from './lib/googleAuth';
 
 export default function App() {
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
@@ -109,9 +110,15 @@ export default function App() {
     setIsLoading(true);
 
     try {
+      const token = getAccessToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           conversationId: currentSessionId,
           content: text,
@@ -151,9 +158,15 @@ export default function App() {
   const handleConfirmStep = async (runId: string, stepId: string, confirmed: boolean) => {
     try {
       setIsLoading(true);
+      const token = getAccessToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const res = await fetch('/api/confirm-step', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ runId, stepId, confirmed }),
       });
       if (res.ok) {
