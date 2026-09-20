@@ -171,7 +171,7 @@ export const Composer: React.FC<ComposerProps> = ({ onSendMessage, isLoading }) 
             placeholder={
               isListening
                 ? 'Listening to voice command...'
-                : 'Ask NEXUS anything lah... "Find Maybank invoice and summarize", "Check calendar tomorrow"...'
+                : 'What do you need done? (e.g. "Find my latest invoice, summarize it and save next to original")'
             }
             className="flex-1 max-h-40 py-3 px-1 text-sm bg-transparent text-slate-100 placeholder:text-slate-500 focus:outline-none resize-none overflow-y-auto leading-relaxed"
           />

@@ -6,6 +6,7 @@ import { ObservabilityDrawer } from './components/ObservabilityDrawer';
 import { HistoryDrawer } from './components/HistoryDrawer';
 import { SettingsModal } from './components/SettingsModal';
 import { InteractiveBackground } from './components/InteractiveBackground';
+import { SecureLandingGateway } from './components/SecureLandingGateway';
 import { ConversationSession, NexusMessage } from './types/nexus';
 import { getAccessToken } from './lib/googleAuth';
 
@@ -15,24 +16,60 @@ export default function App() {
   const [messages, setMessages] = useState<NexusMessage[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
+  // Security Gateway & Session State (Movement 03)
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isEmergencyLocked, setIsEmergencyLocked] = useState<boolean>(false);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [securityChecked, setSecurityChecked] = useState<boolean>(false);
+
   // Drawers / Modals
   const [isObservabilityOpen, setIsObservabilityOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  // Fetch conversations on load
+  // Check initial security state and existing session token on load
   useEffect(() => {
-    loadSessions();
+    checkSecurityPosture();
   }, []);
+
+  const checkSecurityPosture = async () => {
+    try {
+      const storedToken = localStorage.getItem('nexus_session_token');
+      const res = await fetch('/api/auth/status', {
+        headers: storedToken ? { Authorization: `Bearer ${storedToken}` } : {},
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setIsEmergencyLocked(!!data.isLocked);
+        if (data.authenticated && !data.isLocked) {
+          setIsAuthenticated(true);
+          setSessionToken(storedToken || data.sessionId);
+          loadSessions();
+        } else {
+          setIsAuthenticated(false);
+        }
+      } else {
+        setIsAuthenticated(false);
+      }
+    } catch (e) {
+      console.error('Failed to verify security posture', e);
+      setIsAuthenticated(false);
+    } finally {
+      setSecurityChecked(true);
+    }
+  };
 
   const loadSessions = async () => {
     try {
-      const res = await fetch('/api/conversations');
+      const storedToken = localStorage.getItem('nexus_session_token');
+      const res = await fetch('/api/conversations', {
+        headers: storedToken ? { Authorization: `Bearer ${storedToken}` } : {},
+      });
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions || []);
         if (data.sessions && data.sessions.length > 0 && !currentSessionId) {
-          // Select most recent session or stay empty
           const first = data.sessions[0];
           setCurrentSessionId(first.id);
           loadMessages(first.id);
@@ -45,7 +82,10 @@ export default function App() {
 
   const loadMessages = async (sessionId: string) => {
     try {
-      const res = await fetch(`/api/conversations/${sessionId}/messages`);
+      const storedToken = localStorage.getItem('nexus_session_token');
+      const res = await fetch(`/api/conversations/${sessionId}/messages`, {
+        headers: storedToken ? { Authorization: `Bearer ${storedToken}` } : {},
+      });
       if (res.ok) {
         const data = await res.json();
         setMessages(data.messages || []);
@@ -57,7 +97,11 @@ export default function App() {
 
   const handleNewChat = async () => {
     try {
-      const res = await fetch('/api/conversations', { method: 'POST' });
+      const storedToken = localStorage.getItem('nexus_session_token');
+      const res = await fetch('/api/conversations', {
+        method: 'POST',
+        headers: storedToken ? { Authorization: `Bearer ${storedToken}` } : {},
+      });
       if (res.ok) {
         const data = await res.json();
         const newSession = data.session;
@@ -77,7 +121,11 @@ export default function App() {
 
   const handleDeleteSession = async (id: string) => {
     try {
-      await fetch(`/api/conversations/${id}`, { method: 'DELETE' });
+      const storedToken = localStorage.getItem('nexus_session_token');
+      await fetch(`/api/conversations/${id}`, {
+        method: 'DELETE',
+        headers: storedToken ? { Authorization: `Bearer ${storedToken}` } : {},
+      });
       setSessions(prev => prev.filter(s => s.id !== id));
       if (currentSessionId === id) {
         handleNewChat();
@@ -85,6 +133,35 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
+  };
+
+  // Emergency Lock Action: Terminates session, freezes tools, returns to Gateway
+  const handleEmergencyLock = async () => {
+    try {
+      const storedToken = localStorage.getItem('nexus_session_token');
+      await fetch('/api/auth/emergency-lock', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(storedToken ? { Authorization: `Bearer ${storedToken}` } : {}),
+        },
+      });
+      localStorage.removeItem('nexus_session_token');
+      setIsAuthenticated(false);
+      setIsEmergencyLocked(true);
+      setSessionToken(null);
+    } catch (e) {
+      console.error('Failed to engage emergency lock', e);
+      setIsAuthenticated(false);
+      setIsEmergencyLocked(true);
+    }
+  };
+
+  const handleAuthenticated = (token: string) => {
+    setSessionToken(token);
+    setIsAuthenticated(true);
+    setIsEmergencyLocked(false);
+    loadSessions();
   };
 
   const handleSendMessage = async (
@@ -99,54 +176,66 @@ export default function App() {
       role: 'user',
       content: text,
       timestamp: new Date().toISOString(),
-      attachments: attachments?.map(a => ({
-        name: a.name,
-        type: a.type,
-        size: a.size,
-      })),
+      attachments: attachments || [],
     };
-
     setMessages(prev => [...prev, tempUserMsg]);
     setIsLoading(true);
 
     try {
-      const token = getAccessToken();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
+      // Fetch fresh Google OAuth token if available
+      const googleToken = await getAccessToken();
+      const storedSessionToken = localStorage.getItem('nexus_session_token');
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (googleToken) {
+        headers['Authorization'] = `Bearer ${googleToken}`;
+      }
+      if (storedSessionToken) {
+        headers['x-nexus-session'] = storedSessionToken;
       }
 
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          conversationId: currentSessionId,
+          conversationId: currentSessionId || undefined,
           content: text,
           attachments,
         }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        // Append assistant message with execution run
-        setMessages(prev => [...prev, data.message]);
-        // Refresh session list to update titles/timestamps
-        loadSessions();
-      } else {
-        const err = await res.json();
-        const errorMsg: NexusMessage = {
-          id: `err_${Date.now()}`,
-          role: 'assistant',
-          content: `I encountered an issue executing this workflow: ${err.error || 'Execution interrupted.'}`,
-          timestamp: new Date().toISOString(),
-        };
-        setMessages(prev => [...prev, errorMsg]);
+      if (res.status === 403) {
+        const errJson = await res.json().catch(() => ({}));
+        if (errJson.code === 'EMERGENCY_LOCKED') {
+          setIsEmergencyLocked(true);
+          setIsAuthenticated(false);
+          return;
+        }
       }
-    } catch (e: any) {
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Server error occurred during execution');
+      }
+
+      const data = await res.json();
+      if (data.message) {
+        setMessages(prev => [...prev.filter(m => m.id !== tempUserMsg.id), tempUserMsg, data.message]);
+      }
+
+      // If a new conversation was created implicitly by the backend, refresh session list
+      if (!currentSessionId && data.message?.executionRun?.conversationId) {
+        setCurrentSessionId(data.message.executionRun.conversationId);
+        loadSessions();
+      }
+    } catch (error: any) {
+      console.error('Workflow error:', error);
       const errorMsg: NexusMessage = {
         id: `err_${Date.now()}`,
         role: 'assistant',
-        content: `Connection error: Could not reach NEXUS execution server.`,
+        content: `Error executing workflow: ${error.message || 'Unknown network error'}. Verify Google Workspace credentials or check Observability logs.`,
         timestamp: new Date().toISOString(),
       };
       setMessages(prev => [...prev, errorMsg]);
@@ -155,42 +244,60 @@ export default function App() {
     }
   };
 
-  const handleConfirmStep = async (runId: string, stepId: string, confirmed: boolean) => {
+  const handleConfirmStep = async (runId: string, stepId: string) => {
     try {
       setIsLoading(true);
-      const token = getAccessToken();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
+      const googleToken = await getAccessToken();
+      const storedSessionToken = localStorage.getItem('nexus_session_token');
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (googleToken) {
+        headers['Authorization'] = `Bearer ${googleToken}`;
+      }
+      if (storedSessionToken) {
+        headers['x-nexus-session'] = storedSessionToken;
       }
 
       const res = await fetch('/api/confirm-step', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ runId, stepId, confirmed }),
+        body: JSON.stringify({ runId, stepId }),
       });
+
       if (res.ok) {
         const data = await res.json();
-        // Update the message containing this run
+        // Update the message carrying this execution run
         setMessages(prev =>
-          prev.map(m => {
-            if (m.executionRun?.id === runId) {
+          prev.map(msg => {
+            if (msg.executionRun?.id === runId) {
               return {
-                ...m,
-                content: data.run.finalResponse || m.content,
+                ...msg,
                 executionRun: data.run,
+                content: data.run.finalResponse || msg.content,
               };
             }
-            return m;
+            return msg;
           })
         );
       }
     } catch (e) {
-      console.error(e);
+      console.error('Failed to confirm step', e);
     } finally {
       setIsLoading(false);
     }
   };
+
+  // Movement 03 Secure Landing Gateway: Unauthenticated or Emergency Locked state
+  if (securityChecked && (!isAuthenticated || isEmergencyLocked)) {
+    return (
+      <SecureLandingGateway
+        onAuthenticated={handleAuthenticated}
+        isEmergencyLocked={isEmergencyLocked}
+      />
+    );
+  }
 
   return (
     <div className="flex flex-col min-h-screen bg-[#07080a] text-slate-100 selection:bg-cyan-500/20 selection:text-cyan-200 relative overflow-x-hidden">
@@ -203,6 +310,8 @@ export default function App() {
         onOpenHistory={() => setIsHistoryOpen(true)}
         onOpenObservability={() => setIsObservabilityOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onEmergencyLock={handleEmergencyLock}
+        isLocked={isEmergencyLocked}
       />
 
       {/* Main Conversational Canvas */}
@@ -237,6 +346,7 @@ export default function App() {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
+        onLockNexus={handleEmergencyLock}
       />
     </div>
   );

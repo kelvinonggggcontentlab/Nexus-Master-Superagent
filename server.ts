@@ -18,6 +18,10 @@ import {
   setExecutionMode,
   setActiveBearerToken,
 } from './server/adapters';
+import { authRouter } from './server/security/routes';
+import { securityHeaders, rateLimit, extractSessionId } from './server/security/middleware';
+import { securityManager } from './server/security';
+import { runWithRequestContext } from './server/security/context';
 
 dotenv.config();
 
@@ -25,6 +29,10 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '15mb' }));
+app.use(securityHeaders);
+
+// Mount Security Gateway & WebAuthn Authentication Routes
+app.use('/api/auth', authRouter);
 
 // Health Check
 app.get('/api/health', (req, res) => {
@@ -107,14 +115,28 @@ app.post('/api/conversations/:id/personality', (req, res) => {
 });
 
 // Primary Chat / Execution endpoint
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', rateLimit(60, 60000), async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
+    let bearerToken: string | undefined = undefined;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7).trim();
       if (token) {
         setActiveBearerToken(token);
+        bearerToken = token;
       }
+    }
+
+    // Resolve session & user context
+    const sessionId = extractSessionId(req) || 'sess_default';
+    const validation = securityManager.validateSession(sessionId);
+    const userId = validation.session?.userId || 'usr_blacktower_root';
+
+    if (validation.valid && validation.session?.isEmergencyLocked) {
+      return res.status(403).json({
+        error: 'NEXUS EMERGENCY LOCK IS ACTIVE. All operations are halted.',
+        code: 'EMERGENCY_LOCKED',
+      });
     }
 
     const { conversationId, content, attachments, personality: requestedPersonality } = req.body;
@@ -122,66 +144,80 @@ app.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: 'Message content or attachment required.' });
     }
 
-    const conv = nexusStore.getOrCreateConversation(conversationId);
+    await runWithRequestContext(
+      {
+        userId,
+        sessionId,
+        deviceId: validation.session?.deviceId,
+        bearerToken,
+        ipAddress: req.ip,
+      },
+      async () => {
+        const conv = nexusStore.getOrCreateConversation(conversationId, userId);
 
-    // Resolve personality (either explicit request or session preset, defaulting to Malaysian)
-    if (requestedPersonality) {
-      setSessionPersonality(conv.id, requestedPersonality);
-    }
-    const activePersonality = getSessionPersonality(conv.id);
+        // Resolve personality (either explicit request or session preset, defaulting to Malaysian)
+        if (requestedPersonality) {
+          setSessionPersonality(conv.id, requestedPersonality);
+        }
+        const activePersonality = getSessionPersonality(conv.id);
 
-    // 1. Record User Message
-    const userMsg: NexusMessage = {
-      id: `msg_user_${Date.now().toString(36)}`,
-      role: 'user',
-      content: content || 'Analyze attached document',
-      timestamp: new Date().toISOString(),
-      attachments: attachments || [],
-    };
-    nexusStore.addMessage(conv.id, userMsg);
+        // 1. Record User Message
+        const userMsg: NexusMessage = {
+          id: `msg_user_${Date.now().toString(36)}`,
+          userId,
+          role: 'user',
+          content: content || 'Analyze attached document',
+          timestamp: new Date().toISOString(),
+          attachments: attachments || [],
+        };
+        nexusStore.addMessage(conv.id, userMsg, userId);
 
-    // 2. Assemble Context (conversation, active task, references, intent, entities, personality)
-    const context = contextEngine.assembleContext(userMsg.content, conv.id, 'operator', activePersonality);
+        // 2. Assemble Context (conversation, active task, references, intent, entities, personality)
+        const context = contextEngine.assembleContext(userMsg.content, conv.id, 'operator', activePersonality);
 
-    // 3. Create Execution Plan (Gemini or deterministic with context and dynamic personality)
-    const plan = await createExecutionPlan(userMsg.content, conv.id, context, activePersonality);
+        // 3. Create Execution Plan (Gemini or deterministic with context and dynamic personality)
+        const plan = await createExecutionPlan(userMsg.content, conv.id, context, activePersonality);
 
-    // 4. Initialize Execution Run
-    const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
-    const executionRun: ExecutionRun = {
-      id: runId,
-      conversationId: conv.id,
-      userPrompt: userMsg.content,
-      status: 'planning',
-      plan,
-      currentStepIndex: 0,
-      stepsCompleted: 0,
-      totalSteps: plan.steps.length,
-      activeStatusText: plan.steps.length > 0 ? 'Synthesizing task graph...' : 'Processing contextual request...',
-      results: {},
-      verificationBadges: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    nexusStore.saveExecutionRun(executionRun);
+        // 4. Initialize Execution Run
+        const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+        const executionRun: ExecutionRun = {
+          id: runId,
+          userId,
+          conversationId: conv.id,
+          userPrompt: userMsg.content,
+          status: 'planning',
+          plan,
+          currentStepIndex: 0,
+          stepsCompleted: 0,
+          totalSteps: plan.steps.length,
+          activeStatusText: plan.steps.length > 0 ? 'Synthesizing task graph...' : 'Processing contextual request...',
+          results: {},
+          verificationBadges: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        nexusStore.saveExecutionRun(executionRun, userId);
 
-    // 5. Execute Autonomous Workflow (passing context and dynamic personality)
-    const completedRun = await agentRuntime.executePlan(executionRun, undefined, context, activePersonality);
+        // 5. Execute Autonomous Workflow (passing context and dynamic personality)
+        const completedRun = await agentRuntime.executePlan(executionRun, undefined, context, activePersonality);
 
-    // 5. Formulate Assistant Response
-    const assistantMsg: NexusMessage = {
-      id: `msg_ast_${Date.now().toString(36)}`,
-      role: 'assistant',
-      content: completedRun.finalResponse || 'Action completed and verified.',
-      timestamp: new Date().toISOString(),
-      executionRun: completedRun,
-    };
-    nexusStore.addMessage(conv.id, assistantMsg);
+        // 6. Formulate Assistant Response
+        const assistantMsg: NexusMessage = {
+          id: `msg_ast_${Date.now().toString(36)}`,
+          userId,
+          role: 'assistant',
+          content: completedRun.finalResponse || 'Action completed and verified.',
+          timestamp: new Date().toISOString(),
+          executionRun: completedRun,
+        };
+        nexusStore.addMessage(conv.id, assistantMsg, userId);
 
-    res.json({
-      message: assistantMsg,
-      executionRun: completedRun,
-    });
+        res.json({
+          message: assistantMsg,
+          executionRun: completedRun,
+        });
+      }
+    );
   } catch (error: any) {
     console.error('Chat execution error:', error);
     res.status(500).json({ error: error.message || 'Workflow execution error' });

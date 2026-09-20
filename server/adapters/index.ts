@@ -19,6 +19,11 @@ export function getExecutionMode(): ExecutionMode {
   return currentMode;
 }
 
+export function resetAdapters(): void {
+  simulationAdapters = createSimulationAdapters();
+  productionAdapters = createProductionAdapters();
+}
+
 export { setActiveBearerToken };
 export * from './types';
 export * from './simulation';

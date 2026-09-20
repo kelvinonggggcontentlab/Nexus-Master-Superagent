@@ -2,7 +2,7 @@ export type ActionCategory = 'read' | 'write' | 'destructive';
 
 export type TaskStatus = 
   | 'pending' 
-  | 'planning'
+  | 'planning' 
   | 'in_progress' 
   | 'completed' 
   | 'failed' 
@@ -10,10 +10,18 @@ export type TaskStatus =
   | 'cancelled'
   | 'replanning';
 
+export type RiskLevel =
+  | 'LOW_RISK'
+  | 'READ_ONLY'
+  | 'WRITE'
+  | 'DESTRUCTIVE'
+  | 'SECURITY_SENSITIVE';
+
 export interface ToolDefinition {
   name: string;
   category: 'drive' | 'gmail' | 'calendar' | 'document' | 'web' | 'memory' | 'notification';
   actionType: ActionCategory;
+  riskLevel?: RiskLevel;
   description: string;
   parameters: Record<string, any>;
   requiresAuth: string[];
@@ -30,6 +38,7 @@ export interface TaskStep {
   tool: string;
   parameters: Record<string, any>;
   actionType: ActionCategory;
+  riskLevel?: RiskLevel;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'verified';
   dependencies: string[]; // step IDs
   requiresConfirmation?: boolean;
@@ -60,6 +69,7 @@ export interface ExecutionPlan {
 
 export interface ExecutionRun {
   id: string;
+  userId?: string;
   conversationId: string;
   userPrompt: string;
   status: TaskStatus;
@@ -85,8 +95,10 @@ export interface ExecutionRun {
 export interface ToolCallLog {
   id: string;
   runId: string;
+  userId?: string;
   tool: string;
   actionType: ActionCategory;
+  riskLevel?: RiskLevel;
   parameters: Record<string, any>;
   result: any;
   status: 'success' | 'failed';
@@ -99,6 +111,7 @@ export interface ToolCallLog {
 
 export interface NexusMessage {
   id: string;
+  userId?: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: string;
@@ -114,6 +127,7 @@ export interface NexusMessage {
 
 export interface ConversationSession {
   id: string;
+  userId?: string;
   title: string;
   createdAt: string;
   updatedAt: string;
@@ -122,6 +136,7 @@ export interface ConversationSession {
 
 export interface MemoryRecord {
   id: string;
+  userId?: string;
   key: string;
   value: string;
   category: 'preference' | 'project_context' | 'contact' | 'rule' | 'custom';
@@ -145,4 +160,47 @@ export interface ObservabilitySummary {
   toolCallsCount: number;
   recentLogs: ToolCallLog[];
   integrations: IntegrationAccount[];
+}
+
+// Gateway & Security Center Types
+export interface TrustedDeviceView {
+  id: string;
+  label: string;
+  platform: string;
+  isCurrentDevice: boolean;
+  registeredAt: string;
+  lastActiveAt: string;
+  revoked: boolean;
+}
+
+export interface ActiveSessionView {
+  sessionId: string;
+  deviceId: string;
+  createdAt: number;
+  lastActivityAt: number;
+  expiresAt: number;
+  isCurrentSession: boolean;
+}
+
+export interface SecurityStatusView {
+  isLocked: boolean;
+  authenticated: boolean;
+  user?: {
+    id: string;
+    email: string;
+    displayName: string;
+    role: string;
+  };
+  activeSessionCount: number;
+  trustedDeviceCount: number;
+  autoLockMinutes: number;
+  autonomousActionsEnabled: boolean;
+  highRiskConfirmationRequired: boolean;
+}
+
+export interface SecurityEventView {
+  id: string;
+  type: string;
+  timestamp: string;
+  details: Record<string, any>;
 }

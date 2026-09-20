@@ -48,12 +48,12 @@ export const ExecutionStatusCard: React.FC<ExecutionStatusCardProps> = ({
           <div className="flex items-center gap-2 truncate">
             <span className="text-xs font-medium text-slate-200 truncate">
               {isRunning
-                ? executionRun.activeStatusText || 'Executing workflow...'
+                ? executionRun.activeStatusText || 'NEXUS is autonomously orchestrating tasks...'
                 : isWaiting
-                ? 'Need your confirmation first boss'
+                ? 'Authorization required to proceed'
                 : isFailed
-                ? 'Workflow interrupted halfway'
-                : `Settle already boss! ${totalSteps}/${totalSteps} actions verified`}
+                ? 'Autopilot execution paused'
+                : `Autopilot task complete — ${totalSteps}/${totalSteps} operations verified`}
             </span>
             <span className="text-[10px] text-slate-400 bg-white/[0.04] px-1.5 py-0.5 rounded border border-white/[0.06] flex-shrink-0">
               {completedCount}/{totalSteps} steps
@@ -61,8 +61,8 @@ export const ExecutionStatusCard: React.FC<ExecutionStatusCardProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-1 text-[11px] text-slate-400 flex-shrink-0 ml-2">
-          <span>{showExpanded ? 'Hide' : 'Details'}</span>
+        <div className="flex items-center gap-1 text-[11px] text-slate-400 hover:text-slate-200 flex-shrink-0 ml-2">
+          <span>{showExpanded ? 'Hide work' : 'Show work'}</span>
           {showExpanded ? (
             <ChevronUp className="w-3.5 h-3.5" />
           ) : (

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, History, Activity, Settings, CheckCircle, AlertCircle, Sparkles } from 'lucide-react';
+import { Plus, History, Activity, Settings, CheckCircle, AlertCircle, Sparkles, Shield, Lock } from 'lucide-react';
 import { auth, googleSignIn } from '../lib/googleAuth';
 import { User, onAuthStateChanged } from 'firebase/auth';
 
@@ -8,7 +8,8 @@ interface HeaderProps {
   onOpenHistory: () => void;
   onOpenObservability: () => void;
   onOpenSettings: () => void;
-  activeSessionTitle?: string;
+  onEmergencyLock?: () => void;
+  isLocked?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -16,6 +17,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenHistory,
   onOpenObservability,
   onOpenSettings,
+  onEmergencyLock,
+  isLocked = false,
 }) => {
   const [authUser, setAuthUser] = useState<User | null>(auth.currentUser);
 
@@ -60,10 +63,10 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </button>
 
-        {/* Live Status indicator */}
-        <div className="hidden md:flex items-center gap-1.5 ml-4 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[11px] font-medium">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span>Active</span>
+        {/* Live Security & Enclave status */}
+        <div className="hidden md:flex items-center gap-1.5 ml-4 px-2.5 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 text-[11px] font-medium">
+          <Shield className="w-3 h-3 text-cyan-400" />
+          <span>Passkey Enclave Active</span>
         </div>
       </div>
 
@@ -121,12 +124,25 @@ export const Header: React.FC<HeaderProps> = ({
           <Activity className="w-4 h-4" />
         </button>
 
+        {/* Emergency Lock NEXUS Trigger in Header */}
+        {onEmergencyLock && (
+          <button
+            id="btn-header-lock"
+            onClick={onEmergencyLock}
+            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-red-400 hover:text-red-300 hover:bg-red-500/10 active:bg-red-500/20 border border-transparent hover:border-red-500/30 transition-all"
+            title="Emergency Lock NEXUS"
+            aria-label="Emergency Lock NEXUS"
+          >
+            <Lock className="w-4 h-4" />
+          </button>
+        )}
+
         <button
           id="btn-settings"
           onClick={onOpenSettings}
           className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/[0.05] active:bg-white/[0.1] border border-transparent hover:border-white/[0.06] transition-all"
-          title="Settings & Workspace Integrations"
-          aria-label="Settings & Workspace Integrations"
+          title="Settings & Security Gateway"
+          aria-label="Settings & Security Gateway"
         >
           <Settings className="w-4 h-4" />
         </button>

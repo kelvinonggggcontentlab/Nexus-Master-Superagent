@@ -14,6 +14,42 @@ import {
   resolvePersonality,
 } from './personality';
 
+// Top-level helper extraction routines
+export const extractEmail = (text: string): string => {
+  const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  if (match) return match[0];
+  const nameMatch = text.match(/(?:email|send to|to)\s+([A-Za-z]+)/i);
+  if (nameMatch) {
+    const name = nameMatch[1].toLowerCase();
+    return `${name}@example.com`;
+  }
+  return 'operator@example.com';
+};
+
+export const extractSearchTerm = (text: string, fallback: string): string => {
+  if (text.includes('invoice')) return 'invoice';
+  if (text.includes('statement')) return 'statement';
+  if (text.includes('masterplan')) return 'masterplan';
+  if (text.includes('roadmap')) return 'roadmap';
+  if (text.includes('contract')) return 'contract';
+  if (text.includes('report')) return 'report';
+  const forMatch = text.match(
+    /(?:find|search for|locate|get)\s+(?:the\s+)?([A-Za-z0-9_\-.\s]{3,30}?)(?:\s+(?:from|in|and|then|$))/i
+  );
+  if (forMatch && forMatch[1].trim()) {
+    return forMatch[1].trim();
+  }
+  return fallback;
+};
+
+export const extractFolder = (text: string): string => {
+  const match = text.match(/(?:\/|to\s+)([A-Za-z0-9_\-/]+)/i);
+  if (match && match[1].includes('/')) {
+    return match[1].startsWith('/') ? match[1] : `/${match[1]}`;
+  }
+  return '/Finance/Archive/2026';
+};
+
 export async function createExecutionPlan(
   userPrompt: string,
   conversationId: string,
@@ -137,11 +173,12 @@ Available Tools:
 ${JSON.stringify(toolsSchema, null, 2)}
 
 Rules:
-1. If the user refers to "it", "that", "the file", "the invoice", REUSE the resolved references or active task entity. DO NOT re-search if the resource is already in context.
-2. If the user says "prepare an email", use "draft_email". If they say "send it", use "send_email".
-3. Any destructive actions (delete_drive_file) MUST have actionType='destructive', requiresConfirmation=true, and a clear confirmationReason.
-4. Express step dependencies clearly using step IDs (e.g. 'step_1', 'step_2').
-5. Keep execution steps strictly factual and verified.`;
+1. If the user refers to "it", "that", "the file", "the invoice", REUSE the resolved references or active task entity. DO NOT re-search if the resource is already in context. When using read_drive_file, always pass the exact fileId from Resolved References target_file.identifier (e.g. parameters: { "fileId": context.resolvedReferences.target_file.identifier }).
+2. If the user says "prepare an email" or "draft an email" with that summary, use a SINGLE step with tool "draft_email" reusing the summary from context. DO NOT re-search Drive, DO NOT re-read the file, and DO NOT call analyze_document again if the summary already exists in context!
+3. If they say "send it", use "send_email".
+4. Any destructive actions (delete_drive_file) MUST have actionType='destructive', requiresConfirmation=true, and a clear confirmationReason.
+5. Express step dependencies clearly using step IDs (e.g. 'step_1', 'step_2').
+6. Keep execution steps strictly factual and verified.`;
 
   let response: any = null;
   const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-flash-latest'];
@@ -218,6 +255,37 @@ Rules:
       }
     }
 
+    // Fallback for search_drive tool if query was omitted
+    if (s.tool === 'search_drive' && (!params.query || params.query === 'undefined' || params.query === '')) {
+      params.query = extractSearchTerm(userPrompt.toLowerCase(), 'invoice');
+    }
+
+    // Fallback for read_drive_file tool if fileId was omitted
+    if (s.tool === 'read_drive_file' && (!params.fileId || params.fileId === 'undefined' || params.fileId === 'auto')) {
+      const resolvedFileId =
+        context.resolvedReferences?.target_file?.identifier ||
+        context.activeTask?.toolResults?.search_drive?.files?.[0]?.id ||
+        context.relevantEntities.find(e => e.type === 'file')?.identifier;
+      if (resolvedFileId) {
+        params.fileId = resolvedFileId;
+      }
+    }
+
+    // Fallback for draft_email / send_email if to was omitted
+    if ((s.tool === 'draft_email' || s.tool === 'send_email') && (!params.to || params.to === 'undefined')) {
+      params.to = extractEmail(userPrompt);
+    }
+
+    // Fallback for draft_email body with summary from context
+    if (s.tool === 'draft_email' && (!params.body || params.body === 'undefined' || params.body === '')) {
+      const summary =
+        context.resolvedReferences?.summary?.label ||
+        context.activeTask?.toolResults?.analyze_document?.summaryLines?.join('\n') ||
+        'Verified document summary';
+      params.body = summary;
+      if (!params.subject) params.subject = 'Document Summary';
+    }
+
     return {
       id: `step_${planId}_${s.stepNumber || idx + 1}`,
       taskId: planId,
@@ -231,7 +299,11 @@ Rules:
       confirmationReason: s.confirmationReason,
       status: 'pending',
       dependencies: (s.dependencies || []).map((d: string) => {
-        if (d.startsWith('step_')) return d;
+        if (d.startsWith(`step_${planId}_`)) return d;
+        const numMatch = d.match(/(\d+)$/);
+        if (numMatch) {
+          return `step_${planId}_${numMatch[1]}`;
+        }
         return `step_${planId}_${d}`;
       }),
     };
@@ -258,42 +330,6 @@ export function buildDeterministicPlan(
   const planId = `plan_${Date.now().toString(36)}`;
   const lower = userPrompt.toLowerCase();
   const steps: TaskStep[] = [];
-
-  // Helper extraction routines
-  const extractEmail = (text: string): string => {
-    const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    if (match) return match[0];
-    const nameMatch = text.match(/(?:email|send to|to)\s+([A-Za-z]+)/i);
-    if (nameMatch) {
-      const name = nameMatch[1].toLowerCase();
-      return `${name}@example.com`;
-    }
-    return 'operator@example.com';
-  };
-
-  const extractSearchTerm = (text: string, fallback: string): string => {
-    if (text.includes('invoice')) return 'invoice';
-    if (text.includes('statement')) return 'statement';
-    if (text.includes('masterplan')) return 'masterplan';
-    if (text.includes('roadmap')) return 'roadmap';
-    if (text.includes('contract')) return 'contract';
-    if (text.includes('report')) return 'report';
-    const forMatch = text.match(
-      /(?:find|search for|locate|get)\s+(?:the\s+)?([A-Za-z0-9_\-.\s]{3,30}?)(?:\s+(?:from|in|and|then|$))/i
-    );
-    if (forMatch && forMatch[1].trim()) {
-      return forMatch[1].trim();
-    }
-    return fallback;
-  };
-
-  const extractFolder = (text: string): string => {
-    const match = text.match(/(?:\/|to\s+)([A-Za-z0-9_\-/]+)/i);
-    if (match && match[1].includes('/')) {
-      return match[1].startsWith('/') ? match[1] : `/${match[1]}`;
-    }
-    return '/Finance/Archive/2026';
-  };
 
   // Check resolved references from context
   const resolvedTargetFile = context?.resolvedReferences?.target_file;
@@ -438,8 +474,115 @@ export function buildDeterministicPlan(
   }
 
   // -------------------------------------------------------------
-  // STANDARD WORKFLOWS
+  // AUTONOMOUS MULTI-STEP WORKFLOWS
   // -------------------------------------------------------------
+
+  // 0. Pipeline: "Find invoice/file, summarize it, and save the summary next to the original"
+  if (
+    (lower.includes('find') || lower.includes('search') || lower.includes('get') || lower.includes('locate')) &&
+    (lower.includes('summarize') || lower.includes('summary')) &&
+    (lower.includes('save') || lower.includes('store') || lower.includes('write')) &&
+    (lower.includes('next to') || lower.includes('alongside') || lower.includes('to drive') || lower.includes('same folder'))
+  ) {
+    const term = extractSearchTerm(lower, 'invoice');
+
+    // Step 1: Search Gmail or Drive for the invoice
+    const isGmailSource = lower.includes('gmail') || lower.includes('email') || lower.includes('inbox');
+    if (isGmailSource) {
+      steps.push({
+        id: `step_${planId}_1`,
+        taskId: planId,
+        stepNumber: 1,
+        title: `Search Gmail Inbox for "${term}"`,
+        description: `Locate matching email invoice in mailbox`,
+        tool: 'search_emails',
+        parameters: { query: term },
+        actionType: 'read',
+        status: 'pending',
+        dependencies: [],
+      });
+      steps.push({
+        id: `step_${planId}_2`,
+        taskId: planId,
+        stepNumber: 2,
+        title: 'Extract Invoice Document Content',
+        description: 'Read email body or retrieve file text stream',
+        tool: 'read_drive_file',
+        parameters: { fileId: 'auto' },
+        actionType: 'read',
+        status: 'pending',
+        dependencies: [`step_${planId}_1`],
+      });
+    } else {
+      steps.push({
+        id: `step_${planId}_1`,
+        taskId: planId,
+        stepNumber: 1,
+        title: `Search Drive for "${term}"`,
+        description: `Locate matching file in Google Drive repository`,
+        tool: 'search_drive',
+        parameters: { query: term },
+        actionType: 'read',
+        status: 'pending',
+        dependencies: [],
+      });
+      steps.push({
+        id: `step_${planId}_2`,
+        taskId: planId,
+        stepNumber: 2,
+        title: 'Extract Document Content',
+        description: 'Read file text stream from Drive storage',
+        tool: 'read_drive_file',
+        parameters: { fileId: 'auto' },
+        actionType: 'read',
+        status: 'pending',
+        dependencies: [`step_${planId}_1`],
+      });
+    }
+
+    // Step 3: Analyze & Summarize Document
+    steps.push({
+      id: `step_${planId}_3`,
+      taskId: planId,
+      stepNumber: 3,
+      title: 'Analyze & Summarize Document',
+      description: 'Extract key figures, dates, and executive highlights',
+      tool: 'analyze_document',
+      parameters: { task: 'summarize', documentText: 'auto' },
+      actionType: 'read',
+      status: 'pending',
+      dependencies: [`step_${planId}_2`],
+    });
+
+    // Step 4: Save Summary Next to Original in Drive
+    steps.push({
+      id: `step_${planId}_4`,
+      taskId: planId,
+      stepNumber: 4,
+      title: `Save Summary Alongside Original in Drive`,
+      description: 'Create summary document in same directory next to original file',
+      tool: 'create_drive_file',
+      parameters: {
+        name: `${term.replace(/\s+/g, '_')}_Summary.txt`,
+        content: 'auto',
+        folder: 'auto',
+      },
+      actionType: 'write',
+      status: 'pending',
+      dependencies: [`step_${planId}_3`],
+    });
+
+    return {
+      id: planId,
+      userGoal: userPrompt,
+      intent: `Find ${term}, summarize it, and save summary next to original in Drive`,
+      requiresConfirmation: false,
+      steps,
+      estimatedTools: isGmailSource
+        ? ['search_emails', 'read_drive_file', 'analyze_document', 'create_drive_file']
+        : ['search_drive', 'read_drive_file', 'analyze_document', 'create_drive_file'],
+    };
+  }
 
   // 1. Pipeline: Find file + summarize/read + email
   if (
@@ -615,7 +758,7 @@ export function buildDeterministicPlan(
   ) {
     let expr = '45900 * 0.08';
     const pctMatch = userPrompt.match(
-      /(\d+(?:\.\d+)?)\s*%\s*(?:tax|on|of)?\s*(?:MYR|USD|\$)?\s*([\d,]+(?:\.\d+)?)/i
+      /(\d+(?:\.\d+)?)\s*%\s*(?:[a-zA-Z\s]{0,35}?)?(?:tax|on|of)?\s*(?:MYR|USD|\$)?\s*([\d,]+(?:\.\d+)?)/i
     );
     if (pctMatch) {
       const pct = parseFloat(pctMatch[1]) / 100;

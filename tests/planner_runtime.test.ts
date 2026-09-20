@@ -110,3 +110,52 @@ test('Runtime: Confirmation Safeguard on Destructive Actions', async () => {
   assert.equal(completedRun.status, 'completed');
   assert.equal(pendingStep.status, 'verified');
 });
+
+test('Autopilot Engine: "Find my latest invoice, summarize it and save the summary next to the original"', async () => {
+  nexusStore.reset();
+
+  const prompt = 'Find my latest invoice, summarize it and save the summary next to the original.';
+  const plan = buildDeterministicPlan(prompt);
+
+  assert.equal(plan.steps.length, 4);
+  assert.equal(plan.steps[0].tool, 'search_drive');
+  assert.equal(plan.steps[1].tool, 'read_drive_file');
+  assert.equal(plan.steps[2].tool, 'analyze_document');
+  assert.equal(plan.steps[3].tool, 'create_drive_file');
+  assert.ok(plan.steps[3].parameters.name.includes('Summary'));
+
+  const runId = `autopilot_test_${Date.now().toString(36)}`;
+  const run: ExecutionRun = {
+    id: runId,
+    conversationId: 'conv_autopilot',
+    userPrompt: prompt,
+    status: 'planning',
+    plan,
+    currentStepIndex: 0,
+    stepsCompleted: 0,
+    totalSteps: plan.steps.length,
+    activeStatusText: 'Starting Autopilot Engine...',
+    results: {},
+    verificationBadges: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const executedRun = await agentRuntime.executePlan(run);
+
+  assert.equal(executedRun.status, 'completed');
+  assert.equal(executedRun.stepsCompleted, 4);
+
+  // Verify created file in Drive
+  assert.ok(executedRun.results.create_drive_file);
+  assert.ok(executedRun.results.create_drive_file.id);
+  assert.equal(executedRun.results.create_drive_file.folder, '/Finance/Invoices/2026');
+  assert.ok(executedRun.results.create_drive_file.sizeBytes > 0);
+
+  // Verify summary highlights were extracted and placed in response
+  assert.ok(executedRun.finalResponse);
+  assert.ok(
+    executedRun.finalResponse.includes('Summary saved as') ||
+    executedRun.finalResponse.includes('Invoice located')
+  );
+});

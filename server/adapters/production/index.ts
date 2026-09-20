@@ -32,7 +32,7 @@ export class ProductionDriveAdapter implements IDriveAdapter {
     const token = getActiveBearerToken();
     if (!token) {
       throw new Error(
-        'Google Drive authorization missing. Please sign in with your Google Workspace account.'
+        'Google Drive authorization missing (GOOGLE_WORKSPACE_ACCESS_TOKEN). Please sign in with your Google Workspace account.'
       );
     }
     return token;
@@ -307,7 +307,7 @@ export class ProductionEmailAdapter implements IEmailAdapter {
     const token = getActiveBearerToken();
     if (!token) {
       throw new Error(
-        'Gmail authorization missing. Please sign in with your Google Workspace account.'
+        'Gmail authorization missing (GMAIL_ACCESS_TOKEN). Please sign in with your Google Workspace account.'
       );
     }
     return token;

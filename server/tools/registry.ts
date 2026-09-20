@@ -1,6 +1,8 @@
 import { ActionCategory, ToolDefinition } from '../../src/types/nexus';
 import { nexusStore } from '../db/store';
 import { getAdapters, VerificationResult } from '../adapters';
+import { securityManager } from '../security';
+import { getCurrentUserId } from '../security/context';
 
 export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
   search_drive: {
@@ -234,9 +236,27 @@ export async function executeToolCall(
   runId: string
 ): Promise<{ success: boolean; data?: any; error?: string; verification?: VerificationResult }> {
   const startTime = Date.now();
+  const userId = getCurrentUserId();
+
+  // Security Gate 1: Check Emergency Lock
+  if (securityManager.isEmergencyLocked(userId)) {
+    return {
+      success: false,
+      error: 'NEXUS EMERGENCY LOCK IS ACTIVE. Tool execution is halted.',
+    };
+  }
+
+  // Security Gate 2: Check Autonomous Action permissions for non-read tools
   const def = TOOL_DEFINITIONS[toolName];
   if (!def) {
     return { success: false, error: `Unknown tool: ${toolName}` };
+  }
+
+  if (def.actionType !== 'read' && !securityManager.isAutonomousActionsEnabled(userId)) {
+    return {
+      success: false,
+      error: 'Autonomous write actions are currently disabled in Security Settings. Operation blocked.',
+    };
   }
 
   const adapters = getAdapters();

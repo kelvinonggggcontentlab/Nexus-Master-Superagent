@@ -12,34 +12,34 @@ interface MessageListProps {
 
 const SAMPLE_COMMANDS = [
   {
-    title: 'Find Invoice & Email Summary',
-    prompt: 'Find the latest Maybank invoice from Drive, summarize it, then email the summary to operator@example.com.',
-    tag: 'Drive + Gmail',
+    title: 'Autonomous Invoice Summary & Archive',
+    prompt: 'Find my latest invoice, summarize it and save the summary next to the original.',
+    tag: 'Autopilot Flow',
   },
   {
-    title: 'Check Calendar Free Slots',
-    prompt: "Check tomorrow's calendar and find a free 1-hour slot.",
-    tag: 'Calendar',
+    title: 'Executive Pitch Deck Summary & Dispatch',
+    prompt: 'Search Drive for the latest Brand Campaign pitch deck, analyze key messaging hooks, and email executive summary to operator@example.com.',
+    tag: 'Workspace Pipeline',
   },
   {
-    title: 'Book Roadmap Review',
-    prompt: 'Check calendar tomorrow and book 1 hour for roadmap review at 11am with team.',
-    tag: 'Schedule',
+    title: 'Calendar Scan & Meeting Scheduler',
+    prompt: "Check tomorrow's calendar for open slots and book a 1-hour Creative Ideation Sprint with the team at 11am.",
+    tag: 'Schedule Auto-Book',
   },
   {
-    title: 'Calculate 8% SST on Invoice',
-    prompt: 'Calculate 8% tax on 45,900 for the billing statement.',
-    tag: 'Financial',
+    title: 'Synthesize Innovation Roadmap Delta',
+    prompt: 'Search Drive for Innovation Strategy documents and compare version highlights with previous roadmap files.',
+    tag: 'Multi-Doc Diff',
   },
   {
-    title: 'Compare Strategic Documents',
-    prompt: 'Search my Drive for the latest Strategic Masterplan document and compare it with the previous version.',
-    tag: 'Analysis',
+    title: 'Deterministic Budget Calculation',
+    prompt: 'Calculate 18% creative agency commission on 125,000 production budget.',
+    tag: 'Verified Math',
   },
   {
-    title: 'Organize Finance Folder',
-    prompt: 'Move the latest Maybank invoice to /Finance/Archive/2026 and verify.',
-    tag: 'Drive Org',
+    title: 'Deep Work Slot Reservation',
+    prompt: "Check tomorrow's calendar and find a free 2-hour uninterrupted creative deep work window.",
+    tag: 'Calendar Autopilot',
   },
 ];
 
@@ -70,10 +70,10 @@ export const MessageList: React.FC<MessageListProps> = ({
 
         {/* Minimal Greeting */}
         <h1 className="text-2xl sm:text-3xl font-semibold text-slate-100 tracking-tight text-center mb-2">
-          Apa macam boss, what need help today?
+          What do you need done?
         </h1>
         <p className="text-xs sm:text-sm text-slate-400 text-center max-w-md mb-8">
-          Just tell me what you need done lah. NEXUS will plan, execute across Workspace, and settle everything for you.
+          Describe what you want. NEXUS autonomously determines connectors, tools, ordering, and verifies the outcome across Google Workspace.
         </p>
 
         {/* Sample Command Chips */}
