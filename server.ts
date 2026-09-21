@@ -19,7 +19,7 @@ import {
   setActiveBearerToken,
 } from './server/adapters';
 import { authRouter } from './server/security/routes';
-import { securityHeaders, rateLimit, extractSessionId } from './server/security/middleware';
+import { securityHeaders, rateLimit, extractSessionId, requireAuth } from './server/security/middleware';
 import { securityManager } from './server/security';
 import { runWithRequestContext } from './server/security/context';
 
@@ -46,38 +46,40 @@ app.get('/api/health', (req, res) => {
 });
 
 // Conversations list
-app.get('/api/conversations', (req, res) => {
-  const sessions = nexusStore.getConversations();
+app.get('/api/conversations', requireAuth, (req, res) => {
+  const sessions = nexusStore.getConversations(req.userId);
   res.json({ sessions });
 });
 
 // Create conversation
-app.post('/api/conversations', (req, res) => {
-  const session = nexusStore.getOrCreateConversation();
+app.post('/api/conversations', requireAuth, (req, res) => {
+  const session = nexusStore.getOrCreateConversation(undefined, req.userId);
   res.json({ session });
 });
 
 // Delete conversation
-app.delete('/api/conversations/:id', (req, res) => {
-  nexusStore.deleteConversation(req.params.id);
+app.delete('/api/conversations/:id', requireAuth, (req, res) => {
+  nexusStore.deleteConversation(req.params.id, req.userId);
   res.json({ success: true });
 });
 
 // Messages for a conversation
-app.get('/api/conversations/:id/messages', (req, res) => {
-  const messages = nexusStore.getMessages(req.params.id);
+app.get('/api/conversations/:id/messages', requireAuth, (req, res) => {
+  const messages = nexusStore.getMessages(req.params.id, req.userId);
   res.json({ messages });
 });
 
 // Context & Active Task for a conversation
-app.get('/api/conversations/:id/context', (req, res) => {
+app.get('/api/conversations/:id/context', requireAuth, (req, res) => {
+  // Ownership check before exposing conversation-scoped context.
+  nexusStore.getMessages(req.params.id, req.userId);
   const activeTask = contextEngine.getActiveTask(req.params.id);
   const entities = contextEngine.getEntities(req.params.id);
   res.json({ activeTask, entities });
 });
 
 // Cancel active task in a conversation
-app.post('/api/conversations/:id/cancel', (req, res) => {
+app.post('/api/conversations/:id/cancel', requireAuth, (req, res) => {
   const cancelResult = contextEngine.cancelActiveTask(
     req.params.id,
     req.body.reason || 'User cancelled task'
@@ -115,7 +117,7 @@ app.post('/api/conversations/:id/personality', (req, res) => {
 });
 
 // Primary Chat / Execution endpoint
-app.post('/api/chat', rateLimit(60, 60000), async (req, res) => {
+app.post('/api/chat', requireAuth, rateLimit(60, 60000), async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     let bearerToken: string | undefined = undefined;
@@ -127,12 +129,16 @@ app.post('/api/chat', rateLimit(60, 60000), async (req, res) => {
       }
     }
 
-    // Resolve session & user context
-    const sessionId = extractSessionId(req) || 'sess_default';
+    // requireAuth has already validated the session and attached request-scoped identity.
+    // Never fall back to the default owner for API execution.
+    const sessionId = extractSessionId(req)!;
     const validation = securityManager.validateSession(sessionId);
-    const userId = validation.session?.userId || 'usr_blacktower_root';
+    const userId = req.userId!;
 
-    if (validation.valid && validation.session?.isEmergencyLocked) {
+    if (!validation.valid || !validation.session) {
+      return res.status(401).json({ error: 'Session invalid or expired.', code: 'SESSION_EXPIRED' });
+    }
+    if (validation.session.isEmergencyLocked) {
       return res.status(403).json({
         error: 'NEXUS EMERGENCY LOCK IS ACTIVE. All operations are halted.',
         code: 'EMERGENCY_LOCKED',
@@ -225,10 +231,10 @@ app.post('/api/chat', rateLimit(60, 60000), async (req, res) => {
 });
 
 // Confirm step for actions requiring confirmation
-app.post('/api/confirm-step', async (req, res) => {
+app.post('/api/confirm-step', requireAuth, async (req, res) => {
   try {
     const { runId, stepId, confirmed } = req.body;
-    const run = nexusStore.getExecutionRun(runId);
+    const run = nexusStore.getExecutionRun(runId, req.userId);
     if (!run) {
       return res.status(404).json({ error: 'Execution run not found' });
     }
@@ -255,31 +261,31 @@ app.post('/api/confirm-step', async (req, res) => {
 });
 
 // Observability and Audit Logs
-app.get('/api/observability', (req, res) => {
-  const summary = nexusStore.getObservabilitySummary();
+app.get('/api/observability', requireAuth, (req, res) => {
+  const summary = nexusStore.getObservabilitySummary(req.userId);
   res.json(summary);
 });
 
 // Integrations Status
-app.get('/api/integrations', (req, res) => {
+app.get('/api/integrations', requireAuth, (req, res) => {
   const integrations = nexusStore.getIntegrations();
   const mode = getExecutionMode();
   res.json({ integrations, mode });
 });
 
 // Toggle Integration (useful for testing failure recovery in simulation/sandbox)
-app.post('/api/integrations/toggle', (req, res) => {
+app.post('/api/integrations/toggle', requireAuth, (req, res) => {
   const { service, connected } = req.body;
   nexusStore.setIntegrationStatus(service, !!connected);
   res.json({ success: true, integrations: nexusStore.getIntegrations(), mode: getExecutionMode() });
 });
 
 // Switch Execution Mode (simulation sandbox vs live Google Workspace production)
-app.get('/api/mode', (req, res) => {
+app.get('/api/mode', requireAuth, (req, res) => {
   res.json({ mode: getExecutionMode() });
 });
 
-app.post('/api/mode', (req, res) => {
+app.post('/api/mode', requireAuth, (req, res) => {
   const { mode } = req.body;
   if (mode === 'simulation' || mode === 'production') {
     setExecutionMode(mode);
@@ -290,14 +296,14 @@ app.post('/api/mode', (req, res) => {
 });
 
 // Memory API
-app.get('/api/memory', (req, res) => {
-  res.json({ memories: nexusStore.getMemories() });
+app.get('/api/memory', requireAuth, (req, res) => {
+  res.json({ memories: nexusStore.getMemories(req.userId) });
 });
 
-app.post('/api/memory', (req, res) => {
+app.post('/api/memory', requireAuth, (req, res) => {
   const { key, value, category } = req.body;
   if (!key || !value) return res.status(400).json({ error: 'Key and value required' });
-  const mem = nexusStore.setMemory(key, value, category || 'preference');
+  const mem = nexusStore.setMemory(key, value, category || 'preference', req.userId);
   res.json({ memory: mem });
 });
 
